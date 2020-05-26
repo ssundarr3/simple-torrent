@@ -32,7 +32,7 @@ pub struct CmdOptions {
     pub torrent_path: std::path::PathBuf,
 
     /// Output directory.
-    #[structopt(short, long, parse(from_os_str), default_value = ".")]
+    #[structopt(short, long, parse(from_os_str), default_value = "downloads")]
     pub out_dir: std::path::PathBuf,
 
     /// Path to cache directory.

@@ -149,7 +149,7 @@ impl Torrent {
     fn shutdown(&mut self, peer_index: usize) {
         if let Some(peer) = self.peers.remove(&peer_index) {
             self.tracker.downloaded += peer.download_rate;
-            info!("Shutting down peer {} {}", peer_index, peer.peer_ip);
+            trace!("Shutting down peer {} {}", peer_index, peer.peer_ip);
         }
     }
 
@@ -436,9 +436,11 @@ impl Torrent {
         for peer_index in to_shutdown {
             self.shutdown(peer_index);
         }
+        let percent_complete =
+            100.0 * ((self.meta_info.data_len - self.left) as f64 / self.meta_info.data_len as f64);
         info!(
-            "Download speed = {:.2} KB/s. Upload down_speed: {:.2} KB/s",
-            down_speed, up_speed
+            "Download speed = {:.2} KB/s. Upload down_speed: {:.2} KB/s. {:.2} % complete",
+            down_speed, up_speed, percent_complete
         );
 
         // TODO: Unchoke peers.

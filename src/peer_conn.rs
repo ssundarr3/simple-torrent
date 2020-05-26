@@ -76,11 +76,13 @@ impl PeerConn {
         let ip = socket.peer_addr().unwrap().ip();
         let (recv_tcp, send_tcp) = socket.into_split();
         let mut peer_conn = PeerConn::new(recv_tcp, send_chan);
-        info!("Starting peer {} {}", peer_conn.id, ip);
+        // TODO: info! instead.
+        trace!("Starting peer {} {}", peer_conn.id, ip);
         match peer_conn.run(send_tcp, ip, info_hash).await {
             Ok(_) => {}
             Err(e) => {
-                warn!("Peer {} error: {}", peer_conn.id, e);
+                // TODO: info! instead.
+                trace!("Peer {} error: {}", peer_conn.id, e);
                 let _ = peer_conn.send(ChanMsgKind::Shutdown);
             }
         }
