@@ -1,0 +1,7 @@
+downloads/
+cache/
+/target
+.DS_Store
+.mypy_cache/
+.vscode/
+cached_trackers/
