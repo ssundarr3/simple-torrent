@@ -19,7 +19,13 @@ fn fake_meta_info(data: &FakeData, tracker_url: Url) -> MetaInfo {
         .chunks(piece_len)
         .map(|piece| Sha1::digest(piece).into())
         .collect();
-    let meta_info = MetaInfo::new(piece_len, data.files.clone(), piece_hashes, tracker_url);
+    let meta_info = MetaInfo::new(
+        data.name.clone(),
+        piece_len,
+        data.files.clone(),
+        piece_hashes,
+        tracker_url,
+    );
 
     // Make sure the encoded and decoded versions match.
     assert_eq!(

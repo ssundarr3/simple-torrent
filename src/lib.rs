@@ -75,6 +75,7 @@ pub async fn run(opts: CmdOptions) -> Result<()> {
     tokio::spawn(async move { listener.start().await });
 
     let tracker = Tracker::new(
+        &meta_info.name,
         &meta_info.info_hash,
         &meta_info.announce,
         listen_addr,

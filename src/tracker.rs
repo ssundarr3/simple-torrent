@@ -36,6 +36,9 @@ pub struct Tracker {
     #[serde(skip, default = "empty_socket_addr")]
     listen_addr: SocketAddr,
 
+    /// A String to more easily identify the torrent.
+    name: String,
+
     /// The url to query to get the tracker response.
     announce: String,
     info_hash: InfoHash,
@@ -96,6 +99,7 @@ impl Tracker {
     const DEFAULT_REQUEST_INTERVAL: Duration = Duration::from_secs(600);
 
     pub fn new(
+        name: &str,
         info_hash: &InfoHash,
         announce: &Url,
         listen_addr: SocketAddr,
@@ -109,6 +113,7 @@ impl Tracker {
                 let mut tracker: Tracker = serde_json::from_str(&s).unwrap();
                 tracker.cache_dir_opt = cache_dir_opt;
                 tracker.listen_addr = listen_addr;
+                tracker.name = name.to_string();
                 return tracker;
             }
         }
@@ -119,6 +124,7 @@ impl Tracker {
             listen_addr,
             downloaded: 0,
             uploaded: 0,
+            name: name.to_string(),
             announce: announce.as_str().to_string(),
             info_hash: info_hash.clone(),
             my_peer_id: gen_peer_id(),
@@ -211,6 +217,7 @@ impl Tracker {
     }
 
     pub fn decode_response(bytes: &[u8]) -> Result<(Duration, HashSet<SocketAddr>)> {
+        info!("tracker response: {:?}", bytes);
         let response_bencode = BencodeValue::decode(bytes)?;
         let dict = response_bencode.get_dict()?;
 
@@ -272,11 +279,18 @@ mod tests {
         // Create tracker.
         let temp_dir = tempfile::TempDir::new().unwrap();
         let cache_dir: PathBuf = temp_dir.path().into();
+        let name = "file or dir name".to_string();
         let info_hash = [77; INFO_HASH_LEN];
         let announce = Url::parse(&mockito::server_url()).unwrap();
         let listen_addr: SocketAddr =
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), 6881);
-        let mut tracker = Tracker::new(&info_hash, &announce, listen_addr, Some(cache_dir.clone()));
+        let mut tracker = Tracker::new(
+            &name,
+            &info_hash,
+            &announce,
+            listen_addr,
+            Some(cache_dir.clone()),
+        );
 
         // Make tracker request and check that the tracker has the information from the tracker request.
         assert!(tracker.peer_addrs.is_empty());
@@ -293,7 +307,7 @@ mod tests {
         // Creating a tracker from the cached file should re-create the tracker exactly.
         assert_eq!(
             tracker,
-            Tracker::new(&info_hash, &announce, listen_addr, Some(cache_dir))
+            Tracker::new(&name, &info_hash, &announce, listen_addr, Some(cache_dir))
         );
     }
 }

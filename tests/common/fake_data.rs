@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct FakeData {
+    pub name: String,
     pub bytes: Vec<u8>,
     pub files: Vec<(PathBuf, usize)>,
 }
@@ -30,13 +31,14 @@ impl FakeData {
         }
         dbg!(bytes::Bytes::copy_from_slice(&bytes[..50]));
 
+        let name = "output".to_string();
         let files: Vec<(PathBuf, usize)> = if file_percents == [100] {
-            vec![(["outfile.txt"].iter().collect(), data_len)]
+            vec![([&name].iter().collect(), data_len)]
         } else {
             let mut files = vec![];
             let mut start_percent = 0;
             for (i, percent) in file_percents.iter().enumerate() {
-                let filepath: PathBuf = ["out_dir", &format!("file_{}", i)].iter().collect();
+                let filepath: PathBuf = [&name, &format!("file_{}", i)].iter().collect();
 
                 let end_percent = start_percent + percent;
                 let start_index = (data_len * start_percent) / 100;
@@ -52,6 +54,6 @@ impl FakeData {
 
         assert_eq!(files.iter().map(|(_, len)| len).sum::<usize>(), data_len);
 
-        FakeData { bytes, files }
+        FakeData { name, bytes, files }
     }
 }

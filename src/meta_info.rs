@@ -28,6 +28,8 @@ pub struct MetaInfo {
     /// A list of hashes, one for each piece. Used to verify that piece data is correct.
     pub piece_hashes: Vec<PieceHash>,
 
+    /// The name of the output directory or file.
+    pub name: String,
     /// The relative path of each file to download and the size of each file in bytes.
     pub files: Vec<(PathBuf, usize)>,
     /// `piece_starts[i]` has the file index and offset of where piece `i` starts.
@@ -121,7 +123,8 @@ impl MetaInfo {
         let files_res = info_dict.val(FILES_KEY);
         // `output` is now either the path to the output file (for single file torrent),
         // or the path to the output directory (for multi-file torrent).
-        output.push(info_dict.val(NAME_KEY)?.get_string()?);
+        let name = info_dict.val(NAME_KEY)?.get_string()?;
+        output.push(name.clone());
         let files: Vec<(PathBuf, usize)> = match (length_res, files_res) {
             (Ok(_), Ok(_)) | (Err(_), Err(_)) => {
                 return Err(FromBencodeErr::ExpectedFileXorDir);
@@ -174,6 +177,7 @@ impl MetaInfo {
             announce: Url::parse(&dict.val(ANNOUNCE_KEY)?.get_string()?)?,
             info_hash: Sha1::digest(&info_dict_bval.encode()).into(),
             piece_len: piece_len,
+            name,
             num_pieces,
             piece_starts: MetaInfo::piece_starts(&files, num_pieces, piece_len),
             piece_hashes,
@@ -225,6 +229,7 @@ impl MetaInfo {
     }
 
     pub fn new(
+        name: String,
         piece_len: usize,
         files: Vec<(PathBuf, usize)>,
         piece_hashes: Vec<PieceHash>,
@@ -235,6 +240,7 @@ impl MetaInfo {
             num_pieces: piece_hashes.len(),
             piece_starts: MetaInfo::piece_starts(&files, piece_hashes.len(), piece_len),
             piece_hashes,
+            name,
             data_len: files.iter().map(|(_, file_len)| file_len).sum(),
             files: files,
             announce: announce,
@@ -325,7 +331,8 @@ mod tests {
             .map(|i| [i as u8; PIECE_HASH_LEN])
             .collect();
         let announce = reqwest::Url::parse("http://example.com/").unwrap();
-        let meta_info = MetaInfo::new(piece_len, files, piece_hashes, announce);
+        let name = "output_dir".to_string();
+        let meta_info = MetaInfo::new(name, piece_len, files, piece_hashes, announce);
 
         // Test encoding and decoding.
         assert_eq!(
