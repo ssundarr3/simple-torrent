@@ -1,7 +1,8 @@
 mod piece;
 
+use crate::bencode::{BencodeDict, BencodeValue, GetFromBencodeDict};
 use crate::chan_msg::{ChanMsg, ChanMsgKind};
-use crate::handshake::Handshake;
+use crate::handshake::{Handshake, EXTENSION_PROTOCOL};
 use crate::meta_info::MetaInfo;
 use crate::peer_conn::PeerConn;
 use crate::torrent::piece::{Piece, PieceStatus};
@@ -250,6 +251,32 @@ impl Torrent {
 
         match msg {
             TorrentMsg::KeepAlive | TorrentMsg::Cancel(_, _) | TorrentMsg::Port(_) => {}
+            TorrentMsg::Extend(extend_id, dict, _extra_bytes) => {
+                // If handshake:
+                //   if we don't have meta info, ask for it.
+                //
+                // TODO: Maybe send this here, or later?
+                // TODO: We want to send this if we already have meta info.
+                // Otherwise, send
+                // let _ = peer.send(TorrentMsg::Bitfield(self.have.clone())).await;
+
+                if extend_id == 0 {
+                    // TOOD: Store the messages that this peer supports in `peer`.
+
+                    // If the peer supports sending metadata, then ask for it.
+                    let m_dict = dict.val(b"m")?.get_dict()?;
+                    if let Ok(metadata_id) = m_dict.val(b"ut_metadata").and_then(|b| b.get_int()) {
+                        let mut req = BencodeDict::new();
+                        req.insert("msg_type".into(), BencodeValue::Int(0));
+                        req.insert("piece".into(), BencodeValue::Int(0));
+                        // TODO: cast to u8 can panic...
+                        peer.send(TorrentMsg::Extend(metadata_id as u8, req, "".into()))
+                            .await?;
+                    }
+                } else {
+                    // Hopefully we get the metadata here...
+                }
+            }
             TorrentMsg::Request(index, block_len) => {
                 if !peer.am_choking
                     && index.piece < self.meta_info.num_pieces
@@ -367,19 +394,49 @@ impl Torrent {
     }
 
     async fn handle_chan_msg(&mut self, chan_msg: ChanMsg) {
+        //TODO:  info: Option<TorrentInfo>,
+        //
         trace!("Received from {}: {}", chan_msg.peer_index, chan_msg.kind);
         match chan_msg.kind {
             ChanMsgKind::NewPeer(mut send_tcp, peer_ip) => {
-                let handshake = Handshake::new(self.meta_info.info_hash, self.tracker.my_peer_id);
+                let handshake = Handshake::new(
+                    self.meta_info.info_hash,
+                    self.tracker.my_peer_id,
+                    EXTENSION_PROTOCOL,
+                );
                 let _ = handshake.write(&mut send_tcp).await;
-                let mut peer = Peer::new(
+                let peer = Peer::new(
                     chan_msg.peer_index,
                     self.meta_info.num_pieces,
                     send_tcp,
                     peer_ip,
                 );
-                let _ = peer.send(TorrentMsg::Bitfield(self.have.clone())).await;
                 self.peers.insert(chan_msg.peer_index, peer);
+            }
+            ChanMsgKind::Handshake(handshake) => {
+                if handshake.protocol != Handshake::PROTOCOL {
+                    warn!("bad protocol: {:?}", handshake.protocol);
+                    self.shutdown(chan_msg.peer_index);
+                    return;
+                }
+                if handshake.info_hash != self.meta_info.info_hash {
+                    warn!("bad info hash: {:?}", handshake.info_hash);
+                    self.shutdown(chan_msg.peer_index);
+                    return;
+                }
+
+                // If the peer supports the extension protocol, let the peer know of the extensions we support.
+                if handshake.flags & EXTENSION_PROTOCOL != 0 {
+                    if let Some(peer) = self.peers.get_mut(&chan_msg.peer_index) {
+                        let mut m = BencodeDict::new();
+                        m.insert("ut_metadata".into(), BencodeValue::Int(42));
+                        let mut b = BencodeDict::new();
+                        b.insert("m".into(), BencodeValue::Dict(m));
+
+                        // b.insert("metadata_size".into(), BencodeValue::Int((433)));
+                        let _ = peer.send(TorrentMsg::Extend(0, b, "".into())).await;
+                    }
+                }
             }
             ChanMsgKind::Msg(msg) => {
                 if let Err(e) = self.handle_torrent_msg(chan_msg.peer_index, msg).await {

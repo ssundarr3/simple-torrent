@@ -11,8 +11,7 @@ lazy_static! {
     static ref NEXT_PEER_ID: AtomicUsize = AtomicUsize::new(0);
 }
 
-/// Manages receiving messages from a peer. Dumps parsed messages to the given
-// `mpsc::UnboundedSender` channel.
+/// Parses TCP messages from peers and forwards them via `send_chan`.
 #[derive(Debug)]
 pub struct PeerConn {
     /// The peer's unique id.
@@ -47,19 +46,15 @@ impl PeerConn {
         &mut self,
         send_tcp: tcp::OwnedWriteHalf,
         ip: IpAddr,
-        info_hash: InfoHash,
+        // TODO: Info hash is no longer required here...
+        _info_hash: InfoHash,
     ) -> Result<()> {
         // Notify the channel of the new peer.
         self.send(ChanMsgKind::NewPeer(send_tcp, ip))?;
 
-        // Receive and validate the handshake.
+        // Receive the handshake.
         let handshake = Handshake::read(&mut self.recv_tcp).await?;
-        if handshake.protocol != Handshake::PROTOCOL {
-            return Err(anyhow!("bad protocol: {:?}", handshake.protocol));
-        }
-        if handshake.info_hash != info_hash {
-            return Err(anyhow!("bad info hash: {:?}", handshake.info_hash));
-        }
+        self.send(ChanMsgKind::Handshake(handshake))?;
 
         // Forward all torrent protocol messages via `send_chan`.
         loop {
@@ -90,6 +85,7 @@ impl PeerConn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handshake::EXTENSION_PROTOCOL;
     use assert_matches::assert_matches;
     use tokio::net::TcpListener;
 
@@ -101,7 +97,7 @@ mod tests {
         // 1. Simulate a peer sending messages via TCP.
         let peer_fut = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let handshake = Handshake::new(info_hash, [0; PEER_ID_LEN]);
+            let handshake = Handshake::new(info_hash, [0; PEER_ID_LEN], EXTENSION_PROTOCOL);
             handshake.write(&mut socket).await.unwrap();
 
             TorrentMsg::Have(42).write(&mut socket).await.unwrap();
@@ -129,6 +125,13 @@ mod tests {
             Some(ChanMsg {
                 peer_index: 0,
                 kind: ChanMsgKind::NewPeer(_, _),
+            })
+        );
+        assert_matches!(
+            recv_chan.recv().await,
+            Some(ChanMsg {
+                peer_index: 0,
+                kind: ChanMsgKind::Handshake(_),
             })
         );
         assert_matches!(

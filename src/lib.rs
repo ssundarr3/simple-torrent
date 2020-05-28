@@ -43,7 +43,7 @@ pub struct CmdOptions {
     #[structopt(long)]
     pub no_cache: bool,
 
-    /// Shut down the program once the download completes.
+    /// Continue seeding after downloading.
     #[structopt(long)]
     pub seed_on_done: bool,
 

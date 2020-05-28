@@ -156,6 +156,7 @@ impl Tracker {
 
     async fn make_request_(&mut self, left: usize, event: Event) -> Result<()> {
         // TODO: Avoid manually percent encoding bytes into the query string.
+        dbg!(&self.announce);
         let url = Url::from_str(&format!(
             "{}?info_hash={}",
             self.announce,

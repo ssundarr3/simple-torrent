@@ -4,7 +4,7 @@ use thiserror::Error;
 #[derive(Debug)]
 pub struct ParseState<'a> {
     pub i: usize,
-    bytes: &'a [u8],
+    pub bytes: &'a [u8],
 }
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -15,8 +15,8 @@ pub enum ParseErr {
     #[error("expected `{}` but found `{}` at index {2}", *.0 as char, *.1 as char)]
     ExpectedButFound(u8, u8, usize),
 
-    #[error("could not parse `{}` at index {1}", *.0 as char)]
-    CouldNotParse(u8, usize),
+    #[error("could not parse `{}` at index {1} in `{2:?}`", *.0 as char)]
+    CouldNotParse(u8, usize, Bytes),
 
     #[error("duplicate dict key `{0:?}`")]
     DuplicateDictKey(Bytes),

@@ -96,6 +96,13 @@ impl BencodeValue {
         Ok(strings)
     }
 
+    pub fn into_dict(self) -> Result<BencodeDict, GetBencodeErr> {
+        match self {
+            BencodeValue::Dict(d) => Ok(d),
+            _ => Err(GetBencodeErr::ExpectedDict(self.clone())),
+        }
+    }
+
     pub fn get_dict(&self) -> Result<&BencodeDict, GetBencodeErr> {
         match self {
             BencodeValue::Dict(d) => Ok(d),
@@ -189,13 +196,24 @@ impl BencodeValue {
                 Ok(BencodeValue::Dict(dict))
             }
             c if c.is_ascii_digit() => Ok(BencodeValue::Bytes(BencodeValue::decode_bytes_(p)?)),
-            c => Err(ParseErr::CouldNotParse(c, p.i)),
+            c => Err(ParseErr::CouldNotParse(
+                c,
+                p.i,
+                Bytes::copy_from_slice(p.bytes),
+            )),
         }
     }
 
     pub fn decode(bytes: &[u8]) -> ParseResult<BencodeValue> {
         let mut p = ParseState::new(bytes);
         BencodeValue::decode_(&mut p)
+    }
+
+    pub fn decode_and_rest(bytes: &[u8]) -> ParseResult<(BencodeValue, &[u8])> {
+        let mut p = ParseState::new(bytes);
+        let decoded = BencodeValue::decode_(&mut p)?;
+        let rest = &p.bytes[p.i..];
+        Ok((decoded, rest))
     }
 }
 

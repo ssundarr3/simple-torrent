@@ -1,7 +1,7 @@
 use crate::common::fake_data::*;
 use bitvec::{order::Msb0, vec::BitVec};
 use bytes::Bytes;
-use simple_torrent::handshake::Handshake;
+use simple_torrent::handshake::{Handshake, EXTENSION_PROTOCOL};
 use simple_torrent::meta_info::MetaInfo;
 use simple_torrent::torrent_msg::{DataIndex, TorrentMsg};
 use simple_torrent::tracker::gen_peer_id;
@@ -71,7 +71,7 @@ impl FakePeer {
 
     pub async fn start(&mut self) {
         let mut socket = self.listener.accept().await.unwrap().0;
-        let handshake = Handshake::new(self.meta_info.info_hash, self.peer_id);
+        let handshake = Handshake::new(self.meta_info.info_hash, self.peer_id, EXTENSION_PROTOCOL);
         handshake.write(&mut socket).await.unwrap();
         Handshake::read(&mut socket).await.unwrap();
 
@@ -112,6 +112,7 @@ impl FakePeer {
                 | TorrentMsg::Choke
                 | TorrentMsg::NotInterested
                 | TorrentMsg::Cancel(_, _)
+                | TorrentMsg::Extend(_, _, _)
                 | TorrentMsg::Port(_) => {}
             }
 

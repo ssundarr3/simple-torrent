@@ -1,3 +1,4 @@
+use crate::handshake::Handshake;
 use crate::torrent_msg::TorrentMsg;
 use std::net::IpAddr;
 use tokio::net::tcp;
@@ -6,6 +7,8 @@ use tokio::net::tcp;
 pub enum ChanMsgKind {
     /// A connection has been created with a peer.
     NewPeer(tcp::OwnedWriteHalf, IpAddr),
+    /// A handshake message from the peer.
+    Handshake(Handshake),
     /// Shutdown the connection with the peer.
     Shutdown,
     /// A torrent message from the peer.
@@ -16,6 +19,7 @@ impl std::fmt::Display for ChanMsgKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ChanMsgKind::NewPeer(_send_tcp, ip) => write!(f, "NewPeer({})", ip),
+            ChanMsgKind::Handshake(handshake) => write!(f, "{:?}", handshake),
             ChanMsgKind::Shutdown => write!(f, "Shutdown"),
             ChanMsgKind::Msg(msg) => write!(f, "Msg({})", msg),
         }

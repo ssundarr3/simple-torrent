@@ -1,8 +1,8 @@
+use crate::bencode::{BencodeDict, BencodeValue};
 use anyhow::Result;
 use bitvec::{order::Msb0, vec::BitVec};
 use bytes::{Bytes, BytesMut};
 use std::convert::TryInto;
-use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const CHOKE_ID: u8 = 0;
@@ -15,6 +15,7 @@ const REQUEST_ID: u8 = 6;
 const BLOCK_ID: u8 = 7;
 const CANCEL_ID: u8 = 8;
 const PORT_ID: u8 = 9;
+const EXTEND_ID: u8 = 20;
 
 /// An index to a byte in the data.
 #[derive(Debug, Hash, Clone, PartialEq, Eq)]
@@ -31,7 +32,7 @@ impl DataIndex {
         DataIndex { piece, offset }
     }
 
-    fn decode(bytes: &[u8]) -> Result<DataIndex, RecvErr> {
+    fn decode(bytes: &[u8]) -> Result<DataIndex> {
         Ok(DataIndex::new(
             u32::from_be_bytes(bytes[..4].try_into()?) as usize,
             u32::from_be_bytes(bytes[4..8].try_into()?) as usize,
@@ -82,15 +83,9 @@ pub enum TorrentMsg {
 
     /// Used to pass the port number for DHT.
     Port(u16),
-}
 
-#[derive(Debug, Error)]
-pub enum RecvErr {
-    #[error("invalid message id `{0}` in `{0:?}`")]
-    InvalidTorrentMsgId(u8, Bytes),
-
-    #[error("{0}")]
-    InvalidSliceSize(#[from] std::array::TryFromSliceError),
+    /// `Extend(extend_id, dict, extra_bytes)` message.
+    Extend(u8, BencodeDict, Bytes),
 }
 
 impl TorrentMsg {
@@ -130,11 +125,17 @@ impl TorrentMsg {
                 buf.extend(&[PORT_ID]);
                 buf.extend(&port.to_be_bytes());
             }
+            TorrentMsg::Extend(extend_id, extend_msg, extra_bytes) => {
+                buf.extend(&[EXTEND_ID]);
+                buf.extend(&extend_id.to_be_bytes());
+                buf.extend(BencodeValue::Dict(extend_msg).encode());
+                buf.extend(extra_bytes);
+            }
         };
         buf.freeze()
     }
 
-    pub fn decode(bytes: Vec<u8>) -> Result<TorrentMsg, RecvErr> {
+    pub fn decode(bytes: Vec<u8>) -> Result<TorrentMsg> {
         let body = bytes.get(1..).unwrap_or(&[]);
         // TODO: [..] may panic.
         match bytes.get(0) {
@@ -161,9 +162,18 @@ impl TorrentMsg {
                 u32::from_be_bytes(body[8..].try_into()?) as usize,
             )),
             Some(&PORT_ID) => Ok(TorrentMsg::Port(u16::from_be_bytes(body.try_into()?))),
-            Some(id) => Err(RecvErr::InvalidTorrentMsgId(
+            Some(&EXTEND_ID) => {
+                let (decoded, rest) = BencodeValue::decode_and_rest(&body[1..])?;
+                Ok(TorrentMsg::Extend(
+                    body[0],
+                    decoded.into_dict()?,
+                    Bytes::copy_from_slice(rest),
+                ))
+            }
+            Some(id) => Err(anyhow!(
+                "unknown TorrentMsg id `{}` in `{:?}`",
                 *id,
-                Bytes::copy_from_slice(body),
+                Bytes::copy_from_slice(&bytes),
             )),
         }
     }
@@ -210,6 +220,14 @@ impl std::fmt::Display for TorrentMsg {
                 index,
                 block.len(),
                 Bytes::copy_from_slice(&block[..(std::cmp::min(5, block.len()))])
+            )
+        } else if let TorrentMsg::Extend(extend_id, dict, bytes) = self {
+            write!(
+                f,
+                "Extend({:?}, dict={:?}, extra={:?})",
+                extend_id,
+                dict,
+                Bytes::copy_from_slice(&bytes[..(std::cmp::min(5, bytes.len()))])
             )
         } else {
             write!(f, "{:?}", self)
@@ -289,5 +307,20 @@ mod tests {
             &[BLOCK_ID, 0, 0, 0, 1, 0, 0, 0, 2, 65, 66, 67],
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_extend_message() {
+        let mut d = BencodeDict::new();
+        d.insert("m".into(), BencodeValue::Int(42));
+
+        test_(
+            TorrentMsg::Extend(1, d.clone(), "".into()),
+            &[
+                EXTEND_ID, 1, // id
+                100, 49, 58, 109, 105, 52, 50, 101, 101, // "d1:mi42ee" in bytes
+            ],
+        )
+        .await
     }
 }

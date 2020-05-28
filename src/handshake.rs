@@ -3,12 +3,13 @@ use anyhow::Result;
 use bytes::{BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+pub const EXTENSION_PROTOCOL: u64 = 1 << 20;
+
 /// A message to initiate a connection with a peer.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Handshake {
     pub protocol: Bytes,
-    // TODO: Just use a u64 instead.
-    pub reserved: [u8; Handshake::NUM_RESERVED_BYTES],
+    pub flags: u64,
     pub info_hash: InfoHash,
     pub peer_id: PeerId,
 }
@@ -17,10 +18,11 @@ impl Handshake {
     pub const PROTOCOL: &'static str = "BitTorrent protocol";
     const NUM_RESERVED_BYTES: usize = 8;
 
-    pub fn new(info_hash: InfoHash, peer_id: PeerId) -> Handshake {
+    //
+    pub fn new(info_hash: InfoHash, peer_id: PeerId, flags: u64) -> Handshake {
         Handshake {
             protocol: Bytes::from(Handshake::PROTOCOL),
-            reserved: [0; Handshake::NUM_RESERVED_BYTES],
+            flags,
             info_hash: info_hash,
             peer_id: peer_id,
         }
@@ -34,7 +36,7 @@ impl Handshake {
         let mut buf = BytesMut::with_capacity(Handshake::encoded_size_(self.protocol.len()));
         buf.put_u8(self.protocol.len() as u8);
         buf.extend(&self.protocol);
-        buf.extend(&self.reserved);
+        buf.extend(&self.flags.to_be_bytes());
         buf.extend(&self.info_hash);
         buf.extend(&self.peer_id);
         buf.freeze()
@@ -62,7 +64,7 @@ impl Handshake {
 
         Ok(Handshake {
             protocol: Bytes::copy_from_slice(&protocol),
-            reserved,
+            flags: u64::from_be_bytes(reserved),
             info_hash,
             peer_id,
         })
@@ -104,14 +106,14 @@ mod tests {
         test_(
             Handshake {
                 protocol: Bytes::from("AAAABBBB"),
-                reserved: [1; Handshake::NUM_RESERVED_BYTES],
+                flags: EXTENSION_PROTOCOL,
                 info_hash: [12; INFO_HASH_LEN],
                 peer_id: [11; PEER_ID_LEN],
             },
             &[
                 8, // protocol length
                 65, 65, 65, 65, 66, 66, 66, 66, // protocol
-                1, 1, 1, 1, 1, 1, 1, 1, // reserved bytes
+                0, 0, 0, 0, 0, 0x10, 0, 0, // reserved bytes
                 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
                 12, // info hash
                 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
