@@ -3,11 +3,9 @@ mod piece;
 use crate::bencode::{BencodeDict, BencodeValue, GetFromBencodeDict};
 use crate::chan_msg::{ChanMsg, ChanMsgKind};
 use crate::handshake::{Handshake, EXTENSION_PROTOCOL};
-use crate::meta_info::MetaInfo;
-use crate::peer_conn::PeerConn;
+use crate::meta::{Info, InfoKind, MetaInfo};
 use crate::torrent::piece::{Piece, PieceStatus};
-use crate::torrent_msg::{DataIndex, TorrentMsg};
-use crate::tracker::{self, Tracker};
+use crate::torrent_msg::{DataIndex, ExtendMsgIds, ExtendMsgKind, TorrentMsg};
 use crate::type_alias::*;
 use crate::util::div_ceil;
 use anyhow::Result;
@@ -15,15 +13,19 @@ use bitvec::{order::Msb0, vec::BitVec};
 use bytes::Bytes;
 use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
-use tokio::{net::tcp, net::TcpStream, sync::mpsc, time::timeout};
+use tokio::{net::tcp, sync::mpsc, time::timeout};
 
 const ZERO_DURATION: Duration = Duration::from_secs(0);
 const TIMEOUT_DURATION: Duration = Duration::from_secs(10);
 const DISCONNECT_TIME: Duration = Duration::from_secs(120);
 const KEEPALIVE_TIME: Duration = Duration::from_secs(100);
 const MAX_DOWNLOADERS: usize = 4;
+const METADATA_BLOCK_LEN: usize = 16 * 1024; // 16KB.
 
 #[derive(Debug)]
 struct Peer {
@@ -48,21 +50,18 @@ struct Peer {
     download_rate: u64,
     /// The number of bytes downloaded from this peer in the last three `TIMEOUT_DURATION`.
     past_download_rates: VecDeque<u64>,
+    /// The ids of the extensions the peer supports.
+    extend_ids: ExtendMsgIds,
 }
 
 impl Peer {
-    pub fn new(
-        peer_index: usize,
-        num_pieces: usize,
-        send_tcp: tcp::OwnedWriteHalf,
-        peer_ip: IpAddr,
-    ) -> Peer {
+    pub fn new(peer_index: usize, send_tcp: tcp::OwnedWriteHalf, peer_ip: IpAddr) -> Peer {
         const DEFAULT_MAX_QUEUE_LEN: usize = 5;
         Peer {
             peer_index,
             send_tcp,
             peer_ip,
-            have: BitVec::repeat(false, div_ceil(num_pieces, 8) * 8),
+            have: BitVec::new(),
             last_msg_time: Instant::now(),
             am_choking: true,
             am_interested: false,
@@ -73,6 +72,13 @@ impl Peer {
             upload_rate: 0,
             download_rate: 0,
             past_download_rates: vec![0, 0, 0].into_iter().collect(),
+            extend_ids: ExtendMsgIds::new(false, false),
+        }
+    }
+
+    pub fn set_num_pieces(&mut self, num_pieces: usize) {
+        if self.have.is_empty() {
+            self.have = BitVec::repeat(false, div_ceil(num_pieces, 8) * 8);
         }
     }
 
@@ -96,66 +102,128 @@ impl Peer {
     }
 }
 
-pub struct Torrent {
-    tracker: Tracker,
-    meta_info: MetaInfo,
-    send_chan: mpsc::UnboundedSender<ChanMsg>,
-    left: usize,
-    have: BitVec<Msb0, u8>,
-    cur_pieces: HashMap<usize, Piece>,
-    peers: HashMap<usize, Peer>,
-    do_not_contact: HashSet<IpAddr>,
-    max_peers: usize,
+#[derive(Debug)]
+pub struct TorrentStats {
+    downloaded: AtomicU64,
+    uploaded: AtomicU64,
+    left: AtomicU64,
+    num_peers: AtomicU32,
+    max_peers: u32,
+    // TODO: Set this in the code...
+    do_not_contact: Mutex<HashSet<IpAddr>>,
 }
 
-impl Torrent {
-    pub fn new(
-        max_peers: usize,
-        send_chan: mpsc::UnboundedSender<ChanMsg>,
-        tracker: Tracker,
-        meta_info: MetaInfo,
-    ) -> Torrent {
-        let mut left = meta_info.data_len;
-        let mut have = BitVec::repeat(false, div_ceil(meta_info.num_pieces, 8) * 8);
-        for piece_index in 0..meta_info.num_pieces {
-            let piece_len = meta_info.piece_len(piece_index);
-            if let Some(data) = Piece::data_from_disk(piece_len, meta_info.piece_files(piece_index))
-            {
-                let piece_hash: PieceHash = Sha1::digest(&data).into();
-                if meta_info.piece_hashes[piece_index] == piece_hash {
-                    have.set(piece_index, true);
-                    left -= data.len();
-                }
-            }
-        }
-        info!(
-            "{}/{} pieces were read from disk!",
-            have.iter().map(|x| *x as u32).sum::<u32>(),
-            meta_info.num_pieces
-        );
-
-        Torrent {
-            tracker,
-            send_chan,
-            left,
-            have,
-            meta_info,
-            cur_pieces: HashMap::new(),
-            peers: HashMap::new(),
-            do_not_contact: HashSet::new(),
+impl TorrentStats {
+    pub fn new(max_peers: u32) -> TorrentStats {
+        TorrentStats {
+            downloaded: AtomicU64::new(0),
+            uploaded: AtomicU64::new(0),
+            left: AtomicU64::new(0),
+            num_peers: AtomicU32::new(0),
+            do_not_contact: Mutex::new(HashSet::new()),
             max_peers,
         }
     }
 
+    pub fn set_downloaded(&self, val: u64) {
+        self.downloaded.fetch_add(val, Ordering::Relaxed);
+    }
+
+    pub fn set_uploaded(&self, val: u64) {
+        self.uploaded.fetch_add(val, Ordering::Relaxed);
+    }
+
+    pub fn downloaded(&self) -> u64 {
+        self.downloaded.load(Ordering::Relaxed)
+    }
+
+    pub fn uploaded(&self) -> u64 {
+        self.uploaded.load(Ordering::Relaxed)
+    }
+
+    pub fn left(&self) -> u64 {
+        self.left.load(Ordering::Relaxed)
+    }
+
+    pub fn num_peers(&self) -> u32 {
+        self.num_peers.load(Ordering::Relaxed)
+    }
+
+    pub fn num_peers_needed(&self) -> u32 {
+        if self.left() == 0 {
+            return 0;
+        }
+        self.max_peers.saturating_sub(self.num_peers())
+    }
+}
+
+pub struct Torrent {
+    // TODO: Set downloaded and uploaded...
+    stats: Arc<TorrentStats>,
+    meta: MetaInfo,
+    have: BitVec<Msb0, u8>,
+    cur_pieces: HashMap<usize, Piece>,
+    peers: HashMap<usize, Peer>,
+    extend_ids: ExtendMsgIds,
+}
+
+impl Torrent {
+    fn set_from_info(&mut self) {
+        if let InfoKind::Full(info) = &self.meta.info_kind {
+            self.have = BitVec::repeat(false, div_ceil(info.num_pieces, 8) * 8);
+            self.stats
+                .left
+                .store(info.data_len as u64, Ordering::Relaxed);
+            for piece_index in 0..info.num_pieces {
+                let piece_len = info.piece_len(piece_index);
+                if let Some(data) = Piece::data_from_disk(piece_len, info.piece_files(piece_index))
+                {
+                    let piece_hash = PieceHash::new(Sha1::digest(&data).into());
+                    if info.piece_hashes[piece_index] == piece_hash {
+                        self.have.set(piece_index, true);
+                        self.stats
+                            .left
+                            .fetch_sub(data.len() as u64, Ordering::Relaxed);
+                    }
+                }
+            }
+
+            for peer in self.peers.values_mut() {
+                peer.set_num_pieces(info.num_pieces);
+            }
+
+            info!(
+                "{}/{} pieces were read from disk!",
+                self.have.iter().map(|x| *x as u32).sum::<u32>(),
+                info.num_pieces
+            );
+        }
+    }
+
+    pub fn new(stats: Arc<TorrentStats>, meta: MetaInfo) -> Torrent {
+        let mut torrent = Torrent {
+            stats,
+            have: BitVec::new(),
+            meta,
+            cur_pieces: HashMap::new(),
+            peers: HashMap::new(),
+            extend_ids: ExtendMsgIds::new(true, false),
+        };
+        torrent.set_from_info();
+        torrent
+    }
+
     fn shutdown(&mut self, peer_index: usize) {
         if let Some(peer) = self.peers.remove(&peer_index) {
-            self.tracker.downloaded += peer.download_rate;
+            // TODO: Tracker update...
+            // self.tracker.cached.downloaded += peer.download_rate;
+            self.stats.num_peers.fetch_sub(1, Ordering::Relaxed);
             trace!("Shutting down peer {} {}", peer_index, peer.peer_ip);
         }
     }
 
     /// Returns at most `n` blocks to request, given a peer that has `have` blocks.
-    /// Prioritizes block in the order:
+    /// Prioritizes blocks in the order:
     ///   1) blocks from pieces that are currently being downloaded, but not already requested.
     ///   2) blocks from pieces not yet started, in order of rarest piece first.
     ///   3) blocks from pieces that are currently being downloaded, and have already been requested.
@@ -164,6 +232,10 @@ impl Torrent {
             return vec![];
         }
         let mut blocks = Vec::with_capacity(n);
+        let info = match &self.meta.info_kind {
+            InfoKind::Full(info) => info,
+            InfoKind::Partial { .. } => panic!("TODO: Pass info to pick_blocks"),
+        };
 
         // 1) Get next blocks from pieces that are currently being downloaded.
         for (piece_index, piece) in self.cur_pieces.iter_mut() {
@@ -196,8 +268,8 @@ impl Torrent {
             .collect();
         piece_freqs_vec.sort_unstable();
         for (_, piece_index) in piece_freqs_vec {
-            let piece_hash = self.meta_info.piece_hashes[piece_index];
-            let piece_len = self.meta_info.piece_len(piece_index);
+            let piece_hash = info.piece_hashes[piece_index];
+            let piece_len = info.piece_len(piece_index);
             assert!(self
                 .cur_pieces
                 .insert(piece_index, Piece::new(piece_hash, piece_len))
@@ -249,43 +321,88 @@ impl Torrent {
         };
         peer.last_msg_time = Instant::now();
 
-        match msg {
-            TorrentMsg::KeepAlive | TorrentMsg::Cancel(_, _) | TorrentMsg::Port(_) => {}
-            TorrentMsg::Extend(extend_id, dict, _extra_bytes) => {
-                // If handshake:
-                //   if we don't have meta info, ask for it.
-                //
-                // TODO: Maybe send this here, or later?
-                // TODO: We want to send this if we already have meta info.
-                // Otherwise, send
-                // let _ = peer.send(TorrentMsg::Bitfield(self.have.clone())).await;
+        let info = match &mut self.meta.info_kind {
+            InfoKind::Partial {
+                info_bytes,
+                downloads_dir,
+                info_hash,
+                ..
+            } => {
+                if let TorrentMsg::Extend(extend_msg) = msg {
+                    let kind = ExtendMsgKind::from_extend_msg(extend_msg, &peer.extend_ids)?;
+                    match kind {
+                        ExtendMsgKind::Handshake(ids) => {
+                            peer.extend_ids = ids;
+                            // Request the first piece of the metadata.
+                            let meta_req_kind = ExtendMsgKind::MetadataRequest(0);
+                            if let Ok(meta_req) =
+                                meta_req_kind.try_into_extend_msg(&peer.extend_ids)
+                            {
+                                let _ = peer.send(TorrentMsg::Extend(meta_req)).await?;
+                            }
+                        }
+                        ExtendMsgKind::MetadataBlock(piece, total_size, block) => {
+                            let start = piece * METADATA_BLOCK_LEN;
+                            // The peer could be lying about `total_size` anyways, so there's no use
+                            // in checking if `block.len()` is <= `METADATA_BLOCK_LEN`.
+                            if info_bytes.len() == start {
+                                info_bytes.extend(block)
+                            }
 
-                if extend_id == 0 {
-                    // TOOD: Store the messages that this peer supports in `peer`.
-
-                    // If the peer supports sending metadata, then ask for it.
-                    let m_dict = dict.val(b"m")?.get_dict()?;
-                    if let Ok(metadata_id) = m_dict.val(b"ut_metadata").and_then(|b| b.get_int()) {
-                        let mut req = BencodeDict::new();
-                        req.insert("msg_type".into(), BencodeValue::Int(0));
-                        req.insert("piece".into(), BencodeValue::Int(0));
-                        // TODO: cast to u8 can panic...
-                        peer.send(TorrentMsg::Extend(metadata_id as u8, req, "".into()))
-                            .await?;
+                            if info_bytes.len() < total_size {
+                                // If not done, request the next piece.
+                                let piece_to_req = info_bytes.len() / METADATA_BLOCK_LEN;
+                                let meta_req_kind = ExtendMsgKind::MetadataRequest(piece_to_req);
+                                if let Ok(meta_req) =
+                                    meta_req_kind.try_into_extend_msg(&peer.extend_ids)
+                                {
+                                    let _ = peer.send(TorrentMsg::Extend(meta_req)).await?;
+                                }
+                            } else {
+                                // Otherwise, construct the meta data.
+                                if let Ok(info) =
+                                    Info::from_bytes(info_bytes, downloads_dir, info_hash)
+                                {
+                                    trace!("Successfully acquired meta data: {:?}", info);
+                                    self.meta.info_kind = InfoKind::Full(info);
+                                    self.meta.maybe_save_to_cache();
+                                    self.set_from_info();
+                                } else {
+                                    // If metadata is not valid, clear existing data and start over.
+                                    info_bytes.clear();
+                                    let meta_req_kind = ExtendMsgKind::MetadataRequest(0);
+                                    if let Ok(meta_req) =
+                                        meta_req_kind.try_into_extend_msg(&peer.extend_ids)
+                                    {
+                                        let _ = peer.send(TorrentMsg::Extend(meta_req)).await?;
+                                    }
+                                }
+                            }
+                        }
+                        ExtendMsgKind::MetadataRequest(piece) => {
+                            // TODO: Respond with Reject message...
+                        }
+                        ExtendMsgKind::Unknown | ExtendMsgKind::MetadataReject(_) => {}
                     }
                 } else {
-                    // Hopefully we get the metadata here...
+                    trace!("meta info not present, ignoring msg: {}", msg);
                 }
+                return Ok(());
+            }
+            InfoKind::Full(info) => info,
+        };
+
+        match msg {
+            TorrentMsg::KeepAlive | TorrentMsg::Cancel(_, _) | TorrentMsg::Port(_) => {}
+            TorrentMsg::Extend(_) => {
+                // TODO: Send reject message if MetadataRequest maybe...
             }
             TorrentMsg::Request(index, block_len) => {
-                if !peer.am_choking
-                    && index.piece < self.meta_info.num_pieces
-                    && self.have[index.piece]
-                {
+                if !peer.am_choking && index.piece < info.num_pieces && self.have[index.piece] {
                     // TODO: Use a piece cache instead of reading from disk each time.
                     let piece_data = Piece::data_from_disk(
-                        self.meta_info.piece_len(index.piece),
-                        self.meta_info.piece_files(index.piece),
+                        info.piece_len(index.piece),
+                        info.piece_files(index.piece),
                     )
                     .unwrap();
                     if let Some(block_data) = piece_data.get(index.offset..index.offset + block_len)
@@ -306,7 +423,7 @@ impl Torrent {
             }
             TorrentMsg::Unchoke => peer.peer_choking = false,
             TorrentMsg::Have(piece_index) => {
-                if piece_index >= self.meta_info.num_pieces {
+                if piece_index >= info.num_pieces {
                     return Err(anyhow!("have {} is out of range", msg));
                 }
                 peer.have.set(piece_index, true);
@@ -319,14 +436,14 @@ impl Torrent {
                     return Err(anyhow!("bitvec len {} != {}", have.len(), peer.have.len()));
                 }
                 peer.have |= have;
-                if (!self.have.clone() & peer.have.clone()).any() {
+                if !self.have.clone() && peer.have.clone() {
                     peer.set_am_interested(true).await?;
                 }
             }
             TorrentMsg::Block(index, block) => {
                 peer.cur_queue_len = peer.cur_queue_len.saturating_sub(1);
                 peer.download_rate += block.len() as u64;
-                if index.piece < self.meta_info.num_pieces && !self.have[index.piece] {
+                if index.piece < info.num_pieces && !self.have[index.piece] {
                     let piece = self.cur_pieces.get_mut(&index.piece).unwrap();
                     piece.insert(index.offset, block);
 
@@ -338,12 +455,13 @@ impl Torrent {
                         }
                         PieceStatus::Complete => {
                             info!("Piece {} is complete", index.piece);
-                            piece.flush_to_disk(self.meta_info.piece_files(index.piece));
-                            self.left -= piece.piece_len;
+                            piece.flush_to_disk(info.piece_files(index.piece));
+                            // self.left -= piece.piece_len;
+                            // TODO: Set stats.left inistead
                             self.have.set(index.piece, true);
                             self.cur_pieces.remove(&index.piece);
 
-                            let download_complete = self.left == 0;
+                            let download_complete = self.stats.left() == 0;
                             for peer in self.peers.values_mut() {
                                 let _ = peer.send(TorrentMsg::Have(index.piece)).await;
                                 if download_complete {
@@ -352,9 +470,10 @@ impl Torrent {
                             }
                             if download_complete {
                                 info!("Download complete!");
-                                self.tracker
-                                    .make_request(self.left, tracker::Event::Completed)
-                                    .await;
+                                // TODO: Tracker...
+                                // self.tracker
+                                //     .make_request(self.left, tracker::Event::Completed)
+                                //     .await;
                             }
                         }
                     }
@@ -394,24 +513,21 @@ impl Torrent {
     }
 
     async fn handle_chan_msg(&mut self, chan_msg: ChanMsg) {
-        //TODO:  info: Option<TorrentInfo>,
-        //
         trace!("Received from {}: {}", chan_msg.peer_index, chan_msg.kind);
         match chan_msg.kind {
             ChanMsgKind::NewPeer(mut send_tcp, peer_ip) => {
                 let handshake = Handshake::new(
-                    self.meta_info.info_hash,
-                    self.tracker.my_peer_id,
+                    self.meta.info_hash,
+                    self.meta.my_peer_id,
                     EXTENSION_PROTOCOL,
                 );
                 let _ = handshake.write(&mut send_tcp).await;
-                let peer = Peer::new(
-                    chan_msg.peer_index,
-                    self.meta_info.num_pieces,
-                    send_tcp,
-                    peer_ip,
-                );
+                let mut peer = Peer::new(chan_msg.peer_index, send_tcp, peer_ip);
+                if let InfoKind::Full(info) = &self.meta.info_kind {
+                    peer.set_num_pieces(info.num_pieces);
+                }
                 self.peers.insert(chan_msg.peer_index, peer);
+                self.stats.num_peers.fetch_add(1, Ordering::Relaxed);
             }
             ChanMsgKind::Handshake(handshake) => {
                 if handshake.protocol != Handshake::PROTOCOL {
@@ -419,7 +535,7 @@ impl Torrent {
                     self.shutdown(chan_msg.peer_index);
                     return;
                 }
-                if handshake.info_hash != self.meta_info.info_hash {
+                if handshake.info_hash != self.meta.info_hash {
                     warn!("bad info hash: {:?}", handshake.info_hash);
                     self.shutdown(chan_msg.peer_index);
                     return;
@@ -428,13 +544,11 @@ impl Torrent {
                 // If the peer supports the extension protocol, let the peer know of the extensions we support.
                 if handshake.flags & EXTENSION_PROTOCOL != 0 {
                     if let Some(peer) = self.peers.get_mut(&chan_msg.peer_index) {
-                        let mut m = BencodeDict::new();
-                        m.insert("ut_metadata".into(), BencodeValue::Int(42));
-                        let mut b = BencodeDict::new();
-                        b.insert("m".into(), BencodeValue::Dict(m));
-
-                        // b.insert("metadata_size".into(), BencodeValue::Int((433)));
-                        let _ = peer.send(TorrentMsg::Extend(0, b, "".into())).await;
+                        let extend_msg = ExtendMsgKind::Handshake(self.extend_ids.clone())
+                            .try_into_extend_msg(&self.extend_ids)
+                            .unwrap();
+                        // Maybe metadata_size needs to be included here?
+                        let _ = peer.send(TorrentMsg::Extend(extend_msg)).await;
                     }
                 }
             }
@@ -449,13 +563,29 @@ impl Torrent {
     }
 
     async fn handle_timeout(&mut self, _rotate_unchoke: bool) {
+        // TODO: This isn't super clean...
+        let info = match &mut self.meta.info_kind {
+            InfoKind::Partial { .. } => {
+                return;
+            }
+            InfoKind::Full(info) => info,
+        };
+
+        // TODO: Get info into a separate variable.
         // Update the state for the tracker and for each peer.
         let mut down_speed = 0.0;
         let mut up_speed = 0.0;
         let mut to_shutdown = vec![];
         for peer in self.peers.values_mut() {
-            self.tracker.downloaded += peer.download_rate;
-            self.tracker.uploaded += peer.upload_rate;
+            // TODO: TorrentStats update...
+            self.stats
+                .downloaded
+                .fetch_add(peer.download_rate, Ordering::Relaxed);
+            self.stats
+                .downloaded
+                .fetch_add(peer.upload_rate, Ordering::Relaxed);
+            // self.tracker.cached.downloaded += peer.download_rate;
+            // self.tracker.cached.uploaded += peer.upload_rate;
 
             peer.past_download_rates.push_back(peer.download_rate);
             peer.past_download_rates.pop_front();
@@ -490,50 +620,52 @@ impl Torrent {
                 to_shutdown.push(peer.peer_index);
             }
         }
-        for peer_index in to_shutdown {
-            self.shutdown(peer_index);
-        }
         let percent_complete =
-            100.0 * ((self.meta_info.data_len - self.left) as f64 / self.meta_info.data_len as f64);
+            100.0 * ((info.data_len - self.stats.left() as usize) as f64 / info.data_len as f64);
         info!(
             "Download speed = {:.2} KB/s. Upload down_speed: {:.2} KB/s. {:.2} % complete",
             down_speed, up_speed, percent_complete
         );
+        for peer_index in to_shutdown {
+            self.shutdown(peer_index);
+        }
 
         // TODO: Unchoke peers.
         // TODO: Rotate the optimistically unchoked peer.
         // if _rotate_unchoke {}
 
         // Maybe make tracker request and add new peers from tracker request.
-        if self.tracker.should_request() {
-            self.tracker
-                .make_request(self.left, tracker::Event::None)
-                .await;
-        }
-        // Cache tracker information regardless, as bytes downloaded, uploaded were updated.
-        self.tracker.maybe_save_to_cache();
+        // TODO: Tracker update...
+        // if self.tracker.should_request() {
+        //     self.tracker
+        //         .make_request(self.left, tracker::Event::None)
+        //         .await;
+        // }
+        // // Cache tracker information regardless, as bytes downloaded, uploaded were updated.
+        // self.tracker.maybe_save_to_cache();
 
-        if self.left != 0 {
-            // Connect to at-most `self.max_peers` peers.
-            let to_connect_addrs: Vec<SocketAddr> = self
-                .tracker
-                .peer_addrs
-                .iter()
-                .filter(|addr| !self.do_not_contact.contains(&addr.ip()))
-                .map(|addr| (*addr).clone())
-                .take(self.max_peers - self.peers.len())
-                .collect();
-            for peer_addr in to_connect_addrs {
-                self.do_not_contact.insert(peer_addr.ip());
-                let send_chan = self.send_chan.clone();
-                let info_hash = self.meta_info.info_hash;
-                tokio::spawn(async move {
-                    if let Ok(socket) = TcpStream::connect(peer_addr).await {
-                        PeerConn::start(socket, send_chan, info_hash).await
-                    }
-                });
-            }
-        }
+        // if self.left != 0 {
+        //     // Connect to at-most `self.max_peers` peers.
+        //     let to_connect_addrs: Vec<SocketAddr> = self
+        //         .tracker
+        //         .cached
+        //         .peer_addrs
+        //         .iter()
+        //         .filter(|addr| !self.do_not_contact.contains(&addr.ip()))
+        //         .map(|addr| (*addr).clone())
+        //         .take(self.max_peers - self.peers.len())
+        //         .collect();
+        //     for peer_addr in to_connect_addrs {
+        //         self.do_not_contact.insert(peer_addr.ip());
+        //         let send_chan = self.send_chan.clone();
+        //         let info_hash = self.meta.info_hash;
+        //         tokio::spawn(async move {
+        //             if let Ok(socket) = TcpStream::connect(peer_addr).await {
+        //                 PeerConn::start(socket, send_chan, info_hash).await
+        //             }
+        //         });
+        // }
+        // }
     }
 
     pub async fn start(
@@ -542,14 +674,14 @@ impl Torrent {
         seed_on_done: bool,
     ) {
         info!("Starting torrent!");
-        self.tracker
-            .make_request(self.left, tracker::Event::None)
-            .await;
+        // self.tracker
+        //     .make_request(self.left, tracker::Event::None)
+        //     .await;
 
         let mut timeout_counter: u64 = 0;
         let mut last_timeout = SystemTime::UNIX_EPOCH;
         const UNCHOKE_PERIOD: u64 = 3;
-        while seed_on_done || self.left > 0 {
+        while seed_on_done || self.stats.left() > 0 {
             // TODO: `try_recv` might be simpler...
             let chan_msg_fut = recv_chan.recv();
             let duration_left = TIMEOUT_DURATION
@@ -568,8 +700,8 @@ impl Torrent {
         }
 
         info!("Stopping torrent...");
-        self.tracker
-            .make_request(self.left, tracker::Event::Stopped)
-            .await;
+        // self.tracker
+        //     .make_request(self.left, tracker::Event::Stopped)
+        //     .await;
     }
 }

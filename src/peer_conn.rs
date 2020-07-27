@@ -93,11 +93,12 @@ mod tests {
     async fn test_peer_conn() {
         let mut listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let info_hash = [41; INFO_HASH_LEN];
+        let info_hash = InfoHash::new([41; InfoHash::LEN]);
         // 1. Simulate a peer sending messages via TCP.
         let peer_fut = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let handshake = Handshake::new(info_hash, [0; PEER_ID_LEN], EXTENSION_PROTOCOL);
+            let handshake =
+                Handshake::new(info_hash, PeerId::new([0; PeerId::LEN]), EXTENSION_PROTOCOL);
             handshake.write(&mut socket).await.unwrap();
 
             TorrentMsg::Have(42).write(&mut socket).await.unwrap();

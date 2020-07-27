@@ -1,10 +1,11 @@
-use crate::bencode::{BencodeDict, BencodeValue};
+use crate::bencode::{BencodeDict, BencodeValue, GetFromBencodeDict};
 use anyhow::Result;
 use bitvec::{order::Msb0, vec::BitVec};
 use bytes::{Bytes, BytesMut};
 use std::convert::TryInto;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+// The ids for various torrent messages.
 const CHOKE_ID: u8 = 0;
 const UNCHOKE_ID: u8 = 1;
 const INTERESTED_ID: u8 = 2;
@@ -48,7 +49,7 @@ impl DataIndex {
 /// A message in the Bittorrent protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TorrentMsg {
-    /// A keep alive message to keep the connection alive.
+    /// A message to keep connection from timing out.
     KeepAlive,
 
     /// The receiver of this message is choked and will not get any more `Piece` messages.
@@ -66,26 +67,39 @@ pub enum TorrentMsg {
     /// `Have(piece_index)` indicates the sender has the piece at `piece_index`.
     Have(usize),
 
-    /// In `Bitfield(haves)`, `haves` is a bitvector where `haves[i]` is set if the sender has piece `i`.
-    /// The sender may choose to not reveal all the pieces they have.
+    /// In `Bitfield(haves)`, `haves` is a bitvector where `haves[i]` indicates that the sender has piece `i`.
+    /// The sender may choose to not reveal all the pieces that they have.
     Bitfield(BitVec<Msb0, u8>),
 
     /// In `Request(DataIndex { piece, offset }, length)`, the sender requests `length` bytes
     /// starting at `offset` within `piece`.
     Request(DataIndex, usize),
 
-    /// `Block(DataIndex { piece, offset }, bytes)` contains the data `bytes` starting at
+    /// `Block(DataIndex { piece, offset }, bytes)` contains `bytes` data starting at
     /// `offset` within `piece`.
     Block(DataIndex, Bytes),
 
     /// `Cancel(index, length)` cancels the request for `length` bytes starting at `index`.
     Cancel(DataIndex, usize),
 
-    /// Used to pass the port number for DHT.
+    /// The `Port` number where the sender is listening for DHT messages.
     Port(u16),
 
-    /// `Extend(extend_id, dict, extra_bytes)` message.
-    Extend(u8, BencodeDict, Bytes),
+    // TODO:
+    // /// `ExtendHandshake(ExtendMsgIds)`
+    // ExtendHandshake(ExtendMsgIds),
+    /// A protocol extension message.
+    Extend(ExtendMsg),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendMsg {
+    /// The extension message id.
+    id: u8,
+    /// Bencoded dictionary data for this extension message.
+    data: BencodeDict,
+    /// Trailing bytes used by `MetadataBlock`.
+    extra: Bytes,
 }
 
 impl TorrentMsg {
@@ -125,11 +139,11 @@ impl TorrentMsg {
                 buf.extend(&[PORT_ID]);
                 buf.extend(&port.to_be_bytes());
             }
-            TorrentMsg::Extend(extend_id, extend_msg, extra_bytes) => {
+            TorrentMsg::Extend(extend) => {
                 buf.extend(&[EXTEND_ID]);
-                buf.extend(&extend_id.to_be_bytes());
-                buf.extend(BencodeValue::Dict(extend_msg).encode());
-                buf.extend(extra_bytes);
+                buf.extend(&extend.id.to_be_bytes());
+                buf.extend(BencodeValue::Dict(extend.data).encode());
+                buf.extend(extend.extra);
             }
         };
         buf.freeze()
@@ -163,12 +177,13 @@ impl TorrentMsg {
             )),
             Some(&PORT_ID) => Ok(TorrentMsg::Port(u16::from_be_bytes(body.try_into()?))),
             Some(&EXTEND_ID) => {
+                let extend_id = body[0];
                 let (decoded, rest) = BencodeValue::decode_and_rest(&body[1..])?;
-                Ok(TorrentMsg::Extend(
-                    body[0],
-                    decoded.into_dict()?,
-                    Bytes::copy_from_slice(rest),
-                ))
+                Ok(TorrentMsg::Extend(ExtendMsg {
+                    id: body[0],
+                    data: decoded.into_dict()?,
+                    extra: Bytes::copy_from_slice(rest),
+                }))
             }
             Some(id) => Err(anyhow!(
                 "unknown TorrentMsg id `{}` in `{:?}`",
@@ -221,17 +236,169 @@ impl std::fmt::Display for TorrentMsg {
                 block.len(),
                 Bytes::copy_from_slice(&block[..(std::cmp::min(5, block.len()))])
             )
-        } else if let TorrentMsg::Extend(extend_id, dict, bytes) = self {
+        } else if let TorrentMsg::Extend(extend) = self {
             write!(
                 f,
-                "Extend({:?}, dict={:?}, extra={:?})",
-                extend_id,
-                dict,
-                Bytes::copy_from_slice(&bytes[..(std::cmp::min(5, bytes.len()))])
+                "Extend({:?}, data={:?}, extra={:?})",
+                extend.id,
+                extend.data,
+                Bytes::copy_from_slice(&extend.extra[..(std::cmp::min(5, extend.extra.len()))])
             )
         } else {
             write!(f, "{:?}", self)
         }
+    }
+}
+
+const EXTEND_HANDSHAKE_ID: u8 = 0;
+/// A mapping from message type to the message id.
+/// Peers choose this mapping and sends it in `ExtendMsg::Handshake`.
+/// Message id of 0 indicates the message type is not supported.
+/// All other message ids must be unique and positive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtendMsgIds {
+    ut_metadata: u8,
+    ut_pex: u8,
+}
+
+// Ids for various messages.
+// These are arbitrary positive byte values that are not repeated.
+const SUPPORTED_EXTENSIONS_KEY: &'static [u8] = b"m";
+const UT_METADATA_KEY: &'static [u8] = b"ut_metadata";
+const UT_PEX_KEY: &'static [u8] = b"ut_pex";
+const METADATA_MSG_TYPE_KEY: &'static [u8] = b"msg_type";
+const METADATA_PIECE_KEY: &'static [u8] = b"piece";
+const METADATA_SIZE_KEY: &'static [u8] = b"total_size";
+const METADATA_REQUEST_ID: i64 = 0;
+const METADATA_BLOCK_ID: i64 = 1;
+const METADATA_REJECT_ID: i64 = 2;
+
+impl ExtendMsgIds {
+    pub fn new(ut_metadata: bool, ut_pex: bool) -> ExtendMsgIds {
+        // Arbitrary positive and unique ids chosen if extension is supported.
+        ExtendMsgIds {
+            ut_metadata: if ut_metadata { 1 } else { 0 },
+            ut_pex: if ut_pex { 2 } else { 0 },
+        }
+    }
+
+    pub fn ut_metadata(&self) -> Result<u8> {
+        if self.ut_metadata == 0 {
+            Err(anyhow!("ut_metadata not supported"))
+        } else {
+            Ok(self.ut_metadata)
+        }
+    }
+
+    pub fn to_bencode(&self) -> BencodeValue {
+        let mut d = BencodeDict::new();
+        d.insert(
+            UT_METADATA_KEY.into(),
+            BencodeValue::Int(self.ut_metadata as i64),
+        );
+        d.insert(UT_PEX_KEY.into(), BencodeValue::Int(self.ut_pex as i64));
+        BencodeValue::Dict(d)
+    }
+
+    pub fn from_bencode(b: &BencodeValue) -> Result<ExtendMsgIds> {
+        let d = b.get_dict()?;
+        const ZERO: BencodeValue = BencodeValue::Int(0);
+        let ut_metadata = d.get(UT_METADATA_KEY).unwrap_or(&ZERO).get_int()? as u8;
+        let ut_pex = d.get(UT_PEX_KEY).unwrap_or(&ZERO).get_int()? as u8;
+        Ok(ExtendMsgIds {
+            ut_metadata,
+            ut_pex,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtendMsgKind {
+    /// A handshake message with the message types supported.
+    Handshake(ExtendMsgIds),
+    /// `MetadataRequest(piece)` is a request for a `piece` of the meta data.
+    /// Each piece (except possibly for the last piece) is 16KB.
+    MetadataRequest(usize),
+    /// `MetadataBlock(piece, total_size, metadata_block)` is the response for a `MetadataRequest`.
+    MetadataBlock(usize, usize, Bytes),
+    /// `MetadataReject(piece)` means the sender will not send `piece` of the meta data.
+    MetadataReject(usize),
+    /// An unknown extension message.
+    Unknown,
+}
+
+impl ExtendMsgKind {
+    pub fn from_extend_msg(msg: ExtendMsg, ids: &ExtendMsgIds) -> Result<ExtendMsgKind> {
+        let parsed = if msg.id == EXTEND_HANDSHAKE_ID {
+            ExtendMsgKind::Handshake(ExtendMsgIds::from_bencode(
+                msg.data.val(SUPPORTED_EXTENSIONS_KEY)?,
+            )?)
+        } else if msg.id == ids.ut_metadata {
+            match msg.data.val(METADATA_MSG_TYPE_KEY)?.get_int()? {
+                METADATA_REQUEST_ID => ExtendMsgKind::MetadataRequest(
+                    msg.data.val(METADATA_PIECE_KEY)?.get_int()? as usize,
+                ),
+                METADATA_BLOCK_ID => ExtendMsgKind::MetadataBlock(
+                    msg.data.val(METADATA_PIECE_KEY)?.get_int()? as usize,
+                    msg.data.val(METADATA_SIZE_KEY)?.get_int()? as usize,
+                    msg.extra,
+                ),
+                METADATA_REJECT_ID => ExtendMsgKind::MetadataReject(
+                    msg.data.val(METADATA_PIECE_KEY)?.get_int()? as usize,
+                ),
+                _ => ExtendMsgKind::Unknown,
+            }
+        } else {
+            ExtendMsgKind::Unknown
+        };
+
+        Ok(parsed)
+    }
+
+    pub fn try_into_extend_msg(self, ids: &ExtendMsgIds) -> Result<ExtendMsg> {
+        let mut data = BencodeDict::new();
+        let mut extra = Bytes::new();
+        let id;
+        match self {
+            ExtendMsgKind::Handshake(ids) => {
+                id = EXTEND_HANDSHAKE_ID;
+                data.insert(SUPPORTED_EXTENSIONS_KEY.into(), ids.to_bencode());
+            }
+            ExtendMsgKind::MetadataRequest(piece) => {
+                id = ids.ut_metadata()?;
+                data.insert(
+                    METADATA_MSG_TYPE_KEY.into(),
+                    BencodeValue::Int(METADATA_REQUEST_ID),
+                );
+                data.insert(METADATA_PIECE_KEY.into(), BencodeValue::Int(piece as i64));
+            }
+            ExtendMsgKind::MetadataBlock(piece, total_size, block) => {
+                id = ids.ut_metadata()?;
+                data.insert(
+                    METADATA_MSG_TYPE_KEY.into(),
+                    BencodeValue::Int(METADATA_BLOCK_ID),
+                );
+                data.insert(METADATA_PIECE_KEY.into(), BencodeValue::Int(piece as i64));
+                data.insert(
+                    METADATA_SIZE_KEY.into(),
+                    BencodeValue::Int(total_size as i64),
+                );
+                extra = block;
+            }
+            ExtendMsgKind::MetadataReject(piece) => {
+                id = ids.ut_metadata()?;
+                data.insert(
+                    METADATA_MSG_TYPE_KEY.into(),
+                    BencodeValue::Int(METADATA_REJECT_ID),
+                );
+                data.insert(METADATA_PIECE_KEY.into(), BencodeValue::Int(piece as i64));
+            }
+            ExtendMsgKind::Unknown => {
+                return Err(anyhow!("unknown extend message"));
+            }
+        };
+
+        Ok(ExtendMsg { id, data, extra })
     }
 }
 
@@ -303,10 +470,78 @@ mod tests {
     #[tokio::test]
     async fn test_block_message() {
         test_(
+            TorrentMsg::Block(DataIndex::new(1, 2), Bytes::new()),
+            &[BLOCK_ID, 0, 0, 0, 1, 0, 0, 0, 2],
+        )
+        .await;
+        test_(
             TorrentMsg::Block(DataIndex::new(1, 2), Bytes::from("ABC")),
             &[BLOCK_ID, 0, 0, 0, 1, 0, 0, 0, 2, 65, 66, 67],
         )
         .await;
+    }
+
+    #[test]
+    fn test_extend_ids() {
+        let ids = ExtendMsgIds::new(true, false);
+        assert_eq!(ExtendMsgIds::from_bencode(&ids.to_bencode()).unwrap(), ids);
+        assert!(ids.ut_metadata().is_ok());
+    }
+
+    fn test_extend_msg_(msg: ExtendMsgKind, ids: &ExtendMsgIds, bad_ids: &ExtendMsgIds) {
+        let extend_msg = msg.clone().try_into_extend_msg(&ids).unwrap();
+        assert_eq!(
+            ExtendMsgKind::from_extend_msg(extend_msg.clone(), &ids).unwrap(),
+            msg
+        );
+
+        if let ExtendMsgKind::Handshake(_) = &msg {
+            // Handshakes do not require knowing message id and can be encoded/decoded.
+            assert_eq!(
+                ExtendMsgKind::from_extend_msg(extend_msg.clone(), &ids).unwrap(),
+                msg
+            );
+        } else {
+            // Other messages cannot be encoded/decoded if id is not known.
+            assert!(msg.clone().try_into_extend_msg(&bad_ids).is_err());
+            assert_eq!(
+                ExtendMsgKind::from_extend_msg(extend_msg, &bad_ids).unwrap(),
+                ExtendMsgKind::Unknown
+            );
+        }
+    }
+
+    #[test]
+    fn test_extend_msg_kind() {
+        let ids = ExtendMsgIds::new(true, false);
+        let bad_ids = ExtendMsgIds::new(false, false);
+
+        let handshake_msg = ExtendMsgKind::Handshake(ids.clone());
+        test_extend_msg_(handshake_msg, &ids, &bad_ids);
+
+        let request_msg = ExtendMsgKind::MetadataRequest(42);
+        test_extend_msg_(request_msg, &ids, &bad_ids);
+
+        let block_msg = ExtendMsgKind::MetadataBlock(12, 1999, "metadata...".into());
+        test_extend_msg_(block_msg, &ids, &bad_ids);
+
+        let reject_msg = ExtendMsgKind::MetadataReject(43);
+        test_extend_msg_(reject_msg, &ids, &bad_ids);
+
+        let unknown_msg = ExtendMsgKind::Unknown;
+        assert!(unknown_msg.try_into_extend_msg(&ids).is_err());
+        assert_eq!(
+            ExtendMsgKind::from_extend_msg(
+                ExtendMsg {
+                    id: 88,
+                    data: BencodeDict::new(),
+                    extra: Bytes::new(),
+                },
+                &ids
+            )
+            .unwrap(),
+            ExtendMsgKind::Unknown
+        );
     }
 
     #[tokio::test]
@@ -315,10 +550,15 @@ mod tests {
         d.insert("m".into(), BencodeValue::Int(42));
 
         test_(
-            TorrentMsg::Extend(1, d.clone(), "".into()),
+            TorrentMsg::Extend(ExtendMsg {
+                id: 1,
+                data: d,
+                extra: "ABC".into(),
+            }),
             &[
                 EXTEND_ID, 1, // id
                 100, 49, 58, 109, 105, 52, 50, 101, 101, // "d1:mi42ee" in bytes
+                65, 66, 67, // extra bytes "ABC"
             ],
         )
         .await

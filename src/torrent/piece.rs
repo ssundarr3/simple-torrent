@@ -1,4 +1,4 @@
-use crate::meta_info::PieceFiles;
+use crate::meta::PieceFiles;
 use crate::torrent_msg::DataIndex;
 use crate::type_alias::*;
 use crate::util::div_ceil;
@@ -6,7 +6,7 @@ use bytes::Bytes;
 use sha1::{Digest, Sha1};
 use std::io::{Read, Seek, SeekFrom, Write};
 
-const BLOCK_LEN: usize = 1usize << 14; // Block size is 16KB.
+const BLOCK_LEN: usize = 16 * 1024; // Each block is 16KB.
 
 #[derive(Debug)]
 pub struct Piece {
@@ -141,7 +141,7 @@ impl Piece {
         for block_opt in &self.blocks {
             hasher.input(block_opt.as_ref().unwrap());
         }
-        let piece_hash: PieceHash = hasher.result().into();
+        let piece_hash = PieceHash::new(hasher.result().into());
         if piece_hash != self.piece_hash {
             PieceStatus::FailedHashCheck
         } else {
@@ -179,7 +179,7 @@ mod tests {
             data.resize(std::cmp::min(data.len() + chunk_size, piece_len), val);
         }
         assert!(data.len() == piece_len);
-        let piece_hash = Sha1::digest(&data[..]).into();
+        let piece_hash = PieceHash::new(Sha1::digest(&data[..]).into());
         (Piece::new(piece_hash, piece_len), data)
     }
 

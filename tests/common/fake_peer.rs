@@ -2,7 +2,7 @@ use crate::common::fake_data::*;
 use bitvec::{order::Msb0, vec::BitVec};
 use bytes::Bytes;
 use simple_torrent::handshake::{Handshake, EXTENSION_PROTOCOL};
-use simple_torrent::meta_info::MetaInfo;
+use simple_torrent::meta::MetaInfo;
 use simple_torrent::torrent_msg::{DataIndex, TorrentMsg};
 use simple_torrent::tracker::gen_peer_id;
 use simple_torrent::type_alias::*;
@@ -17,7 +17,7 @@ pub struct FakePeer {
     peer_id: PeerId,
     have: BitVec<Msb0, u8>,
     data: FakeData,
-    meta_info: MetaInfo,
+    meta: MetaInfo,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -55,13 +55,13 @@ impl PiecesHave {
 }
 
 impl FakePeer {
-    pub async fn new(meta_info: Arc<MetaInfo>, data: Arc<FakeData>, have: PiecesHave) -> FakePeer {
+    pub async fn new(meta: Arc<MetaInfo>, data: Arc<FakeData>, have: PiecesHave) -> FakePeer {
         FakePeer {
             listener: TcpListener::bind("127.0.0.1:0").await.unwrap(),
             peer_id: gen_peer_id(),
-            have: have.to_bitfield(meta_info.num_pieces),
+            have: have.to_bitfield(meta.info().num_pieces),
             data: (*data).clone(),
-            meta_info: (*meta_info).clone(),
+            meta: (*meta).clone(),
         }
     }
 
@@ -71,7 +71,7 @@ impl FakePeer {
 
     pub async fn start(&mut self) {
         let mut socket = self.listener.accept().await.unwrap().0;
-        let handshake = Handshake::new(self.meta_info.info_hash, self.peer_id, EXTENSION_PROTOCOL);
+        let handshake = Handshake::new(self.meta.info_hash, self.peer_id, EXTENSION_PROTOCOL);
         handshake.write(&mut socket).await.unwrap();
         Handshake::read(&mut socket).await.unwrap();
 
@@ -81,7 +81,7 @@ impl FakePeer {
             .unwrap();
 
         let mut other_have: BitVec<Msb0, u8> = BitVec::repeat(false, self.have.len());
-        let mut complete: BitVec<Msb0, u8> = BitVec::repeat(true, self.meta_info.num_pieces);
+        let mut complete: BitVec<Msb0, u8> = BitVec::repeat(true, self.meta.num_pieces);
         for _ in 0..(other_have.len() - complete.len()) {
             complete.push(false);
         }
@@ -96,7 +96,7 @@ impl FakePeer {
                 TorrentMsg::Have(i) => other_have.set(i, true),
                 TorrentMsg::Bitfield(have) => other_have |= have,
                 TorrentMsg::Request(index, block_len) => {
-                    let start = index.piece * self.meta_info.piece_len + index.offset;
+                    let start = index.piece * self.meta.piece_len + index.offset;
                     let end = start + block_len;
                     TorrentMsg::Block(index, Bytes::copy_from_slice(&self.data.bytes[start..end]))
                         .write(&mut socket)
@@ -104,7 +104,7 @@ impl FakePeer {
                         .unwrap();
                 }
                 TorrentMsg::Block(index, block) => {
-                    assert_eq!(block.len(), self.meta_info.piece_len(index.piece));
+                    assert_eq!(block.len(), self.meta.piece_len(index.piece));
                     self.have.set(index.piece, true);
                 }
                 TorrentMsg::Unchoke
@@ -121,7 +121,7 @@ impl FakePeer {
                 if *need {
                     TorrentMsg::Request(
                         DataIndex::new(piece_index, 0),
-                        self.meta_info.piece_len(piece_index),
+                        self.meta.piece_len(piece_index),
                     )
                     .write(&mut socket)
                     .await
