@@ -7,6 +7,7 @@ use sha1::{Digest, Sha1};
 use simple_torrent::meta_info::MetaInfo;
 use simple_torrent::tracker::Tracker;
 use simple_torrent::type_alias::*;
+use simple_torrent::CmdInput;
 use std::io::prelude::*;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -72,13 +73,12 @@ async fn test(data: Arc<FakeData>, peer_pieces_haves: Vec<PiecesHave>) {
 
     let output_dir = tempfile::tempdir().unwrap();
     let opts = simple_torrent::CmdOptions {
-        torrent_path: torrent_file.path().into(),
+        cmd_input: CmdInput::TorrentFile(torrent_file.path().into()),
         out_dir: output_dir.path().into(),
         cache_dir: "".into(),
         no_cache: true,
         seed_on_done,
         max_peers: 30,
-        dry_run: false,
     };
 
     // Run the torrent.

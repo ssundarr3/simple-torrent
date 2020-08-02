@@ -9,6 +9,7 @@ pub mod bencode;
 pub mod chan_msg;
 pub mod handshake;
 pub mod listener;
+pub mod magnet_link;
 pub mod meta_info;
 pub mod peer_conn;
 pub mod torrent;
@@ -18,6 +19,7 @@ pub mod type_alias;
 pub mod util;
 
 use crate::listener::Listener;
+use crate::magnet_link::MagnetLinkInfo;
 use crate::meta_info::MetaInfo;
 use crate::tracker::Tracker;
 use anyhow::Result;
@@ -28,8 +30,8 @@ use tokio::sync::mpsc;
 #[structopt(name = "torrent", about = "A simple Bittorrent client.")]
 pub struct CmdOptions {
     /// Path to torrent file.
-    #[structopt(parse(from_os_str))]
-    pub torrent_path: std::path::PathBuf,
+    #[structopt(parse(try_from_str = parse_cmd_input))]
+    pub cmd_input: CmdInput,
 
     /// Output directory.
     #[structopt(short, long, parse(from_os_str), default_value = "downloads")]
@@ -50,10 +52,21 @@ pub struct CmdOptions {
     /// The maximum number of peers to connect to.
     #[structopt(long, default_value = "50")]
     pub max_peers: usize,
+}
 
-    /// Run in dry mode. Will do everything except start the download.
-    #[structopt(long)]
-    pub dry_run: bool,
+/// The input to the program is either a magnet link or a path to a torrent file.
+#[derive(Debug, Clone)]
+pub enum CmdInput {
+    MagnetLink(MagnetLinkInfo),
+    TorrentFile(std::path::PathBuf),
+}
+
+fn parse_cmd_input(input_str: &str) -> Result<CmdInput> {
+    if let Some(uri) = MagnetLinkInfo::is_magnet_uri(input_str) {
+        Ok(CmdInput::MagnetLink(MagnetLinkInfo::from_uri(uri)?))
+    } else {
+        Ok(CmdInput::TorrentFile(input_str.into()))
+    }
 }
 
 pub async fn run(opts: CmdOptions) -> Result<()> {
@@ -63,10 +76,14 @@ pub async fn run(opts: CmdOptions) -> Result<()> {
         Some(opts.cache_dir)
     };
 
-    // Parse the torrent file.
-    let bytes = std::fs::read(opts.torrent_path)?;
-    let bencode = bencode::BencodeValue::decode(&bytes)?;
-    let meta_info = MetaInfo::from_bencode(&bencode, opts.out_dir)?;
+    let meta_info = match opts.cmd_input {
+        CmdInput::MagnetLink { .. } => todo!("Magnet link not yet supported"),
+        CmdInput::TorrentFile(filepath) => {
+            let bytes = std::fs::read(filepath)?;
+            let bencode = bencode::BencodeValue::decode(&bytes)?;
+            MetaInfo::from_bencode(&bencode, opts.out_dir)?
+        }
+    };
 
     // Listen for new connections.
     let (send_chan, recv_chan) = mpsc::unbounded_channel();
@@ -83,9 +100,7 @@ pub async fn run(opts: CmdOptions) -> Result<()> {
     );
     let mut torrent = torrent::Torrent::new(opts.max_peers, send_chan, tracker, meta_info);
 
-    if !opts.dry_run {
-        torrent.start(recv_chan, opts.seed_on_done).await;
-    }
+    torrent.start(recv_chan, opts.seed_on_done).await;
 
     Ok(())
 }
