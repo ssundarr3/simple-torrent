@@ -7,7 +7,7 @@ Currently supports downloading, uploading and resuming a torrent.
 
 1. Install rust and cargo (https://www.rust-lang.org/tools/install).
 
-2. Build using: `cargo run --release`.
+2. Build using: `cargo build --release`.
 
 3. Run the built executable: `./target/release/simple-torrent <path_to_torrent_file>`. Or, build and run in one command using: `cargo run --release <path_to_torrent_file>`.
 
