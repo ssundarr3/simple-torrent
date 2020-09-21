@@ -1,4 +1,4 @@
-use crate::type_alias::{InfoHash, INFO_HASH_LEN};
+use crate::type_alias::InfoHash;
 use anyhow::Result;
 use std::collections::HashMap;
 
@@ -33,10 +33,10 @@ impl MagnetLinkInfo {
 
         const XT_URN_PREFIX: &str = "urn:btih:";
         if urn.get(..XT_URN_PREFIX.len()) == Some(XT_URN_PREFIX) {
-            let mut data = [0u8; INFO_HASH_LEN];
+            let mut data = [0u8; InfoHash::LEN];
             hex::decode_to_slice(&urn[XT_URN_PREFIX.len()..], &mut data)?;
             Ok(MagnetLinkInfo {
-                info_hash: data,
+                info_hash: InfoHash::new(data),
                 name: name.to_string(),
                 tracker_url_opt,
             })

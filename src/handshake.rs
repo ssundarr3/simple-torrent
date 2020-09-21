@@ -27,7 +27,7 @@ impl Handshake {
     }
 
     fn encoded_size_(protocol_len: usize) -> usize {
-        1 + protocol_len + Handshake::NUM_RESERVED_BYTES + INFO_HASH_LEN + PEER_ID_LEN
+        1 + protocol_len + Handshake::NUM_RESERVED_BYTES + InfoHash::LEN + PeerId::LEN
     }
 
     fn encode_(&self) -> Bytes {
@@ -35,8 +35,8 @@ impl Handshake {
         buf.put_u8(self.protocol.len() as u8);
         buf.extend(&self.protocol);
         buf.extend(&self.reserved);
-        buf.extend(&self.info_hash);
-        buf.extend(&self.peer_id);
+        buf.extend(self.info_hash.get());
+        buf.extend(self.peer_id.get());
         buf.freeze()
     }
 
@@ -54,17 +54,17 @@ impl Handshake {
         let mut reserved = [0; Handshake::NUM_RESERVED_BYTES];
         stream.read_exact(&mut reserved).await?;
 
-        let mut info_hash = [0; INFO_HASH_LEN];
+        let mut info_hash = [0; InfoHash::LEN];
         stream.read_exact(&mut info_hash).await?;
 
-        let mut peer_id = [0; PEER_ID_LEN];
+        let mut peer_id = [0; PeerId::LEN];
         stream.read_exact(&mut peer_id).await?;
 
         Ok(Handshake {
             protocol: Bytes::copy_from_slice(&protocol),
             reserved,
-            info_hash,
-            peer_id,
+            info_hash: InfoHash::new(info_hash),
+            peer_id: PeerId::new(peer_id),
         })
     }
 
@@ -105,8 +105,8 @@ mod tests {
             Handshake {
                 protocol: Bytes::from("AAAABBBB"),
                 reserved: [1; Handshake::NUM_RESERVED_BYTES],
-                info_hash: [12; INFO_HASH_LEN],
-                peer_id: [11; PEER_ID_LEN],
+                info_hash: InfoHash::new([12; InfoHash::LEN]),
+                peer_id: PeerId::new([11; PeerId::LEN]),
             },
             &[
                 8, // protocol length

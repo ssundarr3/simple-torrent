@@ -55,7 +55,7 @@ pub enum FromBencodeErr {
 
     #[error(
         "found {0} bytes when parsing piece hashes which is not divisible by {}",
-        PIECE_HASH_LEN
+        PieceHash::LEN
     )]
     InvalidPieceHashBytes(usize),
 
@@ -156,12 +156,12 @@ impl MetaInfo {
         }
 
         let hashes_bytes = info_dict.val(PIECE_HASHES_KEY)?.get_bytes()?;
-        if hashes_bytes.len() % PIECE_HASH_LEN != 0 {
+        if hashes_bytes.len() % PieceHash::LEN != 0 {
             return Err(FromBencodeErr::InvalidPieceHashBytes(hashes_bytes.len()));
         }
         let piece_hashes: Vec<PieceHash> = hashes_bytes
-            .chunks_exact(PIECE_HASH_LEN)
-            .map(|chunk| chunk.try_into().unwrap())
+            .chunks_exact(PieceHash::LEN)
+            .map(|chunk| PieceHash::new(chunk.try_into().unwrap()))
             .collect();
 
         let piece_len = info_dict.val(PIECE_LEN_KEY)?.get_int()? as usize;
@@ -175,7 +175,7 @@ impl MetaInfo {
 
         Ok(MetaInfo {
             announce: Url::parse(&dict.val(ANNOUNCE_KEY)?.get_string()?)?,
-            info_hash: Sha1::digest(&info_dict_bval.encode()).into(),
+            info_hash: InfoHash::new(Sha1::digest(&info_dict_bval.encode()).into()),
             piece_len: piece_len,
             name,
             num_pieces,
@@ -244,13 +244,13 @@ impl MetaInfo {
             data_len: files.iter().map(|(_, file_len)| file_len).sum(),
             files: files,
             announce: announce,
-            info_hash: [0; INFO_HASH_LEN],
+            info_hash: InfoHash::new([0; InfoHash::LEN]),
         };
 
         // Set the info hash.
         let b = meta_info.to_bencode();
         let info_dict = b.get_dict().unwrap().val(INFO_KEY).unwrap();
-        meta_info.info_hash = Sha1::digest(&info_dict.encode()).into();
+        meta_info.info_hash = InfoHash::new(Sha1::digest(&info_dict.encode()).into());
 
         meta_info
     }
@@ -276,7 +276,7 @@ impl MetaInfo {
         );
         let mut piece_hashes_concat = BytesMut::new();
         for piece_hash in &self.piece_hashes {
-            piece_hashes_concat.extend(piece_hash);
+            piece_hashes_concat.extend(piece_hash.get());
         }
         i.insert(
             PIECE_HASHES_KEY.into(),
@@ -327,8 +327,8 @@ mod tests {
             ("output_dir/file_4.txt".into(), 200_000),
         ];
         let data_len = files.iter().map(|(_, file_len)| file_len).sum();
-        let piece_hashes: Vec<[u8; PIECE_HASH_LEN]> = (0..div_ceil(data_len, piece_len))
-            .map(|i| [i as u8; PIECE_HASH_LEN])
+        let piece_hashes: Vec<PieceHash> = (0..div_ceil(data_len, piece_len))
+            .map(|i| PieceHash::new([i as u8; PieceHash::LEN]))
             .collect();
         let announce = reqwest::Url::parse("http://example.com/").unwrap();
         let name = "output_dir".to_string();

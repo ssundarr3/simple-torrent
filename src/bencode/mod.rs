@@ -96,6 +96,13 @@ impl BencodeValue {
         Ok(strings)
     }
 
+    pub fn into_dict(self) -> Result<BencodeDict, GetBencodeErr> {
+        match self {
+            BencodeValue::Dict(d) => Ok(d),
+            _ => Err(GetBencodeErr::ExpectedDict(self.clone())),
+        }
+    }
+
     pub fn get_dict(&self) -> Result<&BencodeDict, GetBencodeErr> {
         match self {
             BencodeValue::Dict(d) => Ok(d),

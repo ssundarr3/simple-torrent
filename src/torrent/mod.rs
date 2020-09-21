@@ -24,13 +24,15 @@ const DISCONNECT_TIME: Duration = Duration::from_secs(120);
 const KEEPALIVE_TIME: Duration = Duration::from_secs(100);
 const MAX_DOWNLOADERS: usize = 4;
 
+type MsbBitVec = BitVec<Msb0, u8>;
+
 #[derive(Debug)]
 struct Peer {
     peer_index: usize,
     send_tcp: tcp::OwnedWriteHalf,
     peer_ip: IpAddr,
     /// A bitfield of the pieces that this peer has.
-    have: BitVec<Msb0, u8>,
+    have: MsbBitVec,
     am_choking: bool,
     am_interested: bool,
     peer_choking: bool,
@@ -100,7 +102,7 @@ pub struct Torrent {
     meta_info: MetaInfo,
     send_chan: mpsc::UnboundedSender<ChanMsg>,
     left: usize,
-    have: BitVec<Msb0, u8>,
+    have: MsbBitVec,
     cur_pieces: HashMap<usize, Piece>,
     peers: HashMap<usize, Peer>,
     do_not_contact: HashSet<IpAddr>,
@@ -120,7 +122,7 @@ impl Torrent {
             let piece_len = meta_info.piece_len(piece_index);
             if let Some(data) = Piece::data_from_disk(piece_len, meta_info.piece_files(piece_index))
             {
-                let piece_hash: PieceHash = Sha1::digest(&data).into();
+                let piece_hash = PieceHash::new(Sha1::digest(&data).into());
                 if meta_info.piece_hashes[piece_index] == piece_hash {
                     have.set(piece_index, true);
                     left -= data.len();
@@ -158,7 +160,7 @@ impl Torrent {
     ///   1) blocks from pieces that are currently being downloaded, but not already requested.
     ///   2) blocks from pieces not yet started, in order of rarest piece first.
     ///   3) blocks from pieces that are currently being downloaded, and have already been requested.
-    fn pick_blocks(&mut self, peer_have: BitVec<Msb0, u8>, n: usize) -> Vec<(DataIndex, usize)> {
+    fn pick_blocks(&mut self, peer_have: MsbBitVec, n: usize) -> Vec<(DataIndex, usize)> {
         if n == 0 {
             return vec![];
         }
@@ -292,7 +294,8 @@ impl Torrent {
                     return Err(anyhow!("bitvec len {} != {}", have.len(), peer.have.len()));
                 }
                 peer.have |= have;
-                if (!self.have.clone() & peer.have.clone()).any() {
+                let pieces_to_get: MsbBitVec = !self.have.clone() & peer.have.clone();
+                if pieces_to_get.any() {
                     peer.set_am_interested(true).await?;
                 }
             }

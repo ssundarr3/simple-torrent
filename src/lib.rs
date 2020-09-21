@@ -76,8 +76,42 @@ pub async fn run(opts: CmdOptions) -> Result<()> {
         Some(opts.cache_dir)
     };
 
+    /*
+    TODO:
+        // Create the listener.
+        // Create the dht.
+
+        // A list of peer connections.
+        // let mut peer_conns = vec![];
+
+        // Create the tracker (needs announce url).
+
+        // loop {
+        //     // Get new peer connections.
+
+        //     // See if it's time for a timeout.
+
+        //     // Check dht messages.
+
+        //     // Check torrent messages.
+
+        //     // Reply to torrent messages.
+        // }
+
+        // Handle SIGINT and cache before quitting.
+        // Maybe create a cached list of good peers and bad peers.
+    */
+
     let meta_info = match opts.cmd_input {
-        CmdInput::MagnetLink { .. } => todo!("Magnet link not yet supported"),
+        CmdInput::MagnetLink { .. } => {
+            // TODO:
+            // Query dht for peers with this info hash.
+            // Hopefully we get to connect with some peers either from dht or from cached tracker responses.
+            // Send torrent handshake messages to these peers to connect.
+            // Ask nicely for meta info file.
+            // Construct meta info file and return back. Maintain connections with peers.
+            todo!("Magnet link not yet supported");
+        }
         CmdInput::TorrentFile(filepath) => {
             let bytes = std::fs::read(filepath)?;
             let bencode = bencode::BencodeValue::decode(&bytes)?;

@@ -82,17 +82,18 @@ impl Event {
     }
 }
 
+// TODO: Place in PeerId.
 pub fn gen_peer_id() -> PeerId {
     const PREFIX: &[u8] = "-AZ2060-".as_bytes();
     let distribution = Uniform::new(0, 10);
     let mut rng = thread_rng();
 
-    let mut peer_id = [0; PEER_ID_LEN];
+    let mut peer_id = [0; PeerId::LEN];
     peer_id[..PREFIX.len()].copy_from_slice(PREFIX);
-    for i in PREFIX.len()..PEER_ID_LEN {
+    for i in PREFIX.len()..PeerId::LEN {
         peer_id[i] = b'0' + rng.sample(distribution);
     }
-    peer_id
+    PeerId::new(peer_id)
 }
 
 impl Tracker {
@@ -159,11 +160,14 @@ impl Tracker {
         let url = Url::from_str(&format!(
             "{}?info_hash={}",
             self.announce,
-            byte_serialize(&self.info_hash).collect::<String>(),
+            byte_serialize(self.info_hash.get()).collect::<String>(),
         ))?;
         let request = Client::new()
             .get(url)
-            .query(&[("peer_id", std::str::from_utf8(&self.my_peer_id).unwrap())])
+            .query(&[(
+                "peer_id",
+                std::str::from_utf8(self.my_peer_id.get()).unwrap(),
+            )])
             .query(&[("left", left)])
             .query(&[("ip", self.listen_addr.ip())])
             .query(&[("port", self.listen_addr.port())])
@@ -280,7 +284,7 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let cache_dir: PathBuf = temp_dir.path().into();
         let name = "file or dir name".to_string();
-        let info_hash = [77; INFO_HASH_LEN];
+        let info_hash = InfoHash::new([77; InfoHash::LEN]);
         let announce = Url::parse(&mockito::server_url()).unwrap();
         let listen_addr: SocketAddr =
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), 6881);

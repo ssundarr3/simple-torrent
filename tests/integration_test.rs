@@ -18,7 +18,7 @@ fn fake_meta_info(data: &FakeData, tracker_url: Url) -> MetaInfo {
     let piece_hashes: Vec<PieceHash> = data
         .bytes
         .chunks(piece_len)
-        .map(|piece| Sha1::digest(piece).into())
+        .map(|piece| PieceHash::new(Sha1::digest(piece).into()))
         .collect();
     let meta_info = MetaInfo::new(
         data.name.clone(),
