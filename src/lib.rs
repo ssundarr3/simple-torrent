@@ -7,6 +7,7 @@ extern crate lazy_static;
 
 pub mod bencode;
 pub mod chan_msg;
+pub mod dht;
 pub mod handshake;
 pub mod listener;
 pub mod magnet_link;
