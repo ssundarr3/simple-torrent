@@ -133,6 +133,7 @@ impl Tracker {
             interval: Tracker::DEFAULT_REQUEST_INTERVAL,
             peer_addrs: HashSet::new(),
         };
+
         tracker.maybe_save_to_cache();
         tracker
     }

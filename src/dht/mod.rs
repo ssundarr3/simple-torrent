@@ -43,9 +43,14 @@ impl RoutingTable {
         Bytes::copy_from_slice(&self.trans_id.to_be_bytes())
     }
 
+    /// Queries a set of default trackers for peers to seed the routing table.
+    pub fn find_initial_peers(&mut self) {
+        todo!()
+    }
+
     /// Inserts or updates `node`.
-    pub fn upsert(node: Node) {
-        //
+    pub fn upsert(&mut self, node: Node) {
+        todo!()
     }
 
     pub fn send(&mut self, msg_kind: DhtMsgKind) -> Result<()> {

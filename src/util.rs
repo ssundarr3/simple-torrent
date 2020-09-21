@@ -25,7 +25,6 @@ pub fn div_ceil(a: usize, b: usize) -> usize {
     (a + b - 1) / b
 }
 
-// TODO: Take dir and info_hash instead.
 pub fn maybe_save_to_cache<T>(t: &T, dir_and_name: Option<(PathBuf, String)>)
 where
     T: Sized + Serialize,
@@ -37,7 +36,6 @@ where
     }
 }
 
-// TODO: Take dir and info_hash instead.
 pub fn read_from_cache<T>(dir_and_name: Option<(PathBuf, String)>) -> Option<T>
 where
     T: Sized + DeserializeOwned,

@@ -53,7 +53,7 @@ impl Token {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DhtMsgKind {
-    /// Ping query to
+    /// Ping
     Ping,
 
     /// Query
