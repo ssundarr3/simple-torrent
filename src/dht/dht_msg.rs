@@ -52,11 +52,31 @@ impl Token {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DhtErrorCode {
+    GenericError = 201,
+    ServerError = 202,
+    ProtocolError = 203,
+    MethodUnknown = 204,
+}
+
+impl DhtErrorCode {
+    pub fn from_i64(x: i64) -> Result<DhtErrorCode> {
+        match x {
+            201 => Ok(DhtErrorCode::GenericError),
+            202 => Ok(DhtErrorCode::ServerError),
+            203 => Ok(DhtErrorCode::ProtocolError),
+            204 => Ok(DhtErrorCode::MethodUnknown),
+            _ => Err(anyhow!("unknown dht error code: {:}", x)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DhtMsgKind {
-    /// Ping
+    /// The Ping query.
     Ping,
 
-    /// Query
+    /// `FindNode(node_id)` is a query to find the IpPort for the given `node_id`.
     FindNode(NodeId),
 
     ///
@@ -77,7 +97,7 @@ pub enum DhtMsgKind {
     Peers(Token, Vec<Node>, Vec<IpPort>),
 
     /// `Error(err_code, err_msg)` message.
-    Error(i64, Bytes),
+    Error(DhtErrorCode, Bytes),
 }
 
 impl DhtMsgKind {
@@ -160,7 +180,7 @@ impl DhtMsgKind {
             }
             DhtMsgKind::Error(err_code, err_msg) => {
                 return BencodeValue::List(vec![
-                    BencodeValue::Int(err_code),
+                    BencodeValue::Int(err_code as i64),
                     BencodeValue::Bytes(err_msg),
                 ]);
             }
@@ -294,7 +314,7 @@ impl DhtMsg {
                 }
                 let err_code = data[0].get_int()?;
                 let err_msg = data[1].get_bytes()?.clone();
-                DhtMsgKind::Error(err_code, err_msg)
+                DhtMsgKind::Error(DhtErrorCode::from_i64(err_code)?, err_msg)
             }
             unknown_msg_kind => {
                 return Err(anyhow!("unknown msg kind: `{:?}`", unknown_msg_kind));
@@ -392,7 +412,7 @@ mod tests {
         let msg = DhtMsg::new(
             "transaction id".into(),
             NodeId::new([0; NodeId::LEN]),
-            DhtMsgKind::Error(123, "hello".into()),
+            DhtMsgKind::Error(DhtErrorCode::GenericError, "hello".into()),
         );
         assert_eq!(
             DhtMsg::from_bencode(&msg.clone().to_bencode()).unwrap(),

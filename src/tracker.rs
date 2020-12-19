@@ -5,7 +5,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use rand::distributions::Uniform;
 use rand::{thread_rng, Rng};
-use reqwest::{Client, Url};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::convert::TryInto;
@@ -156,14 +156,14 @@ impl Tracker {
         self.last_query_time.elapsed().unwrap() >= self.interval
     }
 
-    async fn make_request_(&mut self, left: usize, event: Event) -> Result<()> {
+    fn make_request_(&mut self, left: usize, event: Event) -> Result<()> {
         // TODO: Avoid manually percent encoding bytes into the query string.
         let url = Url::from_str(&format!(
             "{}?info_hash={}",
             self.announce,
             byte_serialize(self.info_hash.get()).collect::<String>(),
         ))?;
-        let request = Client::new()
+        let request = reqwest::blocking::Client::new()
             .get(url)
             .query(&[(
                 "peer_id",
@@ -177,7 +177,8 @@ impl Tracker {
             .query(&[("compact", 1)])
             .query(&[("event", event.into_string())]);
 
-        let response = request.send().await?.bytes().await?;
+        // TODO: Stop using a `blocking::Client`...
+        let response: Bytes = request.send()?.bytes()?;
         self.last_query_time = SystemTime::now();
         let (interval, peer_addrs) = Tracker::decode_response(&response)?;
         self.interval = interval;
@@ -186,8 +187,8 @@ impl Tracker {
         Ok(())
     }
 
-    pub async fn make_request(&mut self, left: usize, event: Event) {
-        match self.make_request_(left, event.clone()).await {
+    pub fn make_request(&mut self, left: usize, event: Event) {
+        match self.make_request_(left, event.clone()) {
             Ok(_) => {
                 info!(
                     "Tracker (Event::{:?}) request ok! Found {} peers",
@@ -271,8 +272,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_tracker_request() {
+    #[test]
+    fn test_tracker_request() {
         // Setup mock http server.
         let interval = Duration::from_secs(42);
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(100, 77, 58, 99)), 8080);
@@ -301,7 +302,7 @@ mod tests {
         assert!(tracker.peer_addrs.is_empty());
         assert!(tracker.should_request());
         assert_eq!(tracker.interval, Tracker::DEFAULT_REQUEST_INTERVAL);
-        tracker.make_request(43, Event::None).await;
+        tracker.make_request(43, Event::None);
         assert_eq!(
             tracker.peer_addrs,
             HashSet::from_iter(vec![addr].into_iter())

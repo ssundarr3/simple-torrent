@@ -16,6 +16,7 @@ pub struct Piece {
     pub piece_len: usize,
     /// Blocks of data that make up a piece.
     /// Option is used to accomodate blocks that arrive out of order.
+    // TODO: Can use mmap to greatly simplify this.
     blocks: Vec<Option<Bytes>>,
     /// The number of blocks left to complete this piece.
     blocks_left: usize,

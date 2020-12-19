@@ -1,46 +1,50 @@
-use crate::chan_msg::ChanMsg;
-use crate::peer_conn::PeerConn;
+// use crate::chan_msg::ChanMsg;
+// use crate::peer_conn::PeerConn;
 use crate::type_alias::*;
 use std::net::SocketAddr;
-use tokio::stream::StreamExt;
-use tokio::{net::TcpListener, sync::mpsc};
+use std::net::{TcpListener, TcpStream};
+// use tokio::sync::mpsc;
 
 pub struct Listener {
     listener: TcpListener,
     info_hash: InfoHash,
-    send_chan: mpsc::UnboundedSender<ChanMsg>,
 }
 
 impl Listener {
-    pub async fn new(
-        info_hash: InfoHash,
-        send_chan: mpsc::UnboundedSender<ChanMsg>,
-    ) -> tokio::io::Result<Listener> {
+    pub fn new(info_hash: InfoHash) -> std::io::Result<Listener> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
         Ok(Listener {
-            listener: TcpListener::bind("127.0.0.1:0").await?,
+            listener,
             info_hash: info_hash,
-            send_chan,
         })
     }
 
-    pub fn addr(&self) -> tokio::io::Result<SocketAddr> {
+    pub fn addr(&self) -> std::io::Result<SocketAddr> {
         self.listener.local_addr()
     }
 
-    pub async fn start(&mut self) {
-        let mut incoming = self.listener.incoming();
-        while let Some(socket_res) = incoming.next().await {
-            match socket_res {
-                Ok(socket) => {
-                    info!("Incoming peer {}", socket.peer_addr().unwrap());
-                    let send_chan = self.send_chan.clone();
-                    let info_hash = self.info_hash;
-                    tokio::spawn(
-                        async move { PeerConn::start(socket, send_chan, info_hash).await },
-                    );
-                }
-                Err(e) => warn!("{}", e),
-            }
+    pub fn accept_conns(&mut self) -> Vec<TcpStream> {
+        let mut streams = vec![];
+        while let Ok((stream, _addr)) = self.listener.accept() {
+            streams.push(stream);
         }
+        return streams;
+    }
+
+    pub fn start(&mut self) {
+        todo!("Listen for connections");
+        // let mut incoming = self.listener.incoming();
+        // while let Some(socket_res) = incoming.next() {
+        //     match socket_res {
+        //         Ok(socket) => {
+        //             info!("Incoming peer {}", socket.peer_addr().unwrap());
+        //             // let send_chan = self.send_chan.clone();
+        //             let info_hash = self.info_hash;
+        //             // tokio::spawn(async move { PeerConn::start(socket, send_chan, info_hash) });
+        //         }
+        //         Err(e) => warn!("{}", e),
+        //     }
+        // }
     }
 }

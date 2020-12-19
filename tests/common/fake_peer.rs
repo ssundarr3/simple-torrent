@@ -55,9 +55,9 @@ impl PiecesHave {
 }
 
 impl FakePeer {
-    pub async fn new(meta_info: Arc<MetaInfo>, data: Arc<FakeData>, have: PiecesHave) -> FakePeer {
+    pub fn new(meta_info: Arc<MetaInfo>, data: Arc<FakeData>, have: PiecesHave) -> FakePeer {
         FakePeer {
-            listener: TcpListener::bind("127.0.0.1:0").await.unwrap(),
+            listener: TcpListener::bind("127.0.0.1:0").unwrap(),
             peer_id: gen_peer_id(),
             have: have.to_bitfield(meta_info.num_pieces),
             data: (*data).clone(),
@@ -69,15 +69,15 @@ impl FakePeer {
         self.listener.local_addr().unwrap()
     }
 
-    pub async fn start(&mut self) {
-        let mut socket = self.listener.accept().await.unwrap().0;
+    pub fn start(&mut self) {
+        let mut socket = self.listener.accept().unwrap().0;
         let handshake = Handshake::new(self.meta_info.info_hash, self.peer_id);
-        handshake.write(&mut socket).await.unwrap();
-        Handshake::read(&mut socket).await.unwrap();
+        handshake.write(&mut socket).unwrap();
+        Handshake::read(&mut socket).unwrap();
 
         TorrentMsg::Bitfield(self.have.clone())
             .write(&mut socket)
-            .await
+            
             .unwrap();
 
         let mut other_have: BitVec<Msb0, u8> = BitVec::repeat(false, self.have.len());
@@ -87,12 +87,12 @@ impl FakePeer {
         }
 
         if self.have != complete {
-            TorrentMsg::Interested.write(&mut socket).await.unwrap();
+            TorrentMsg::Interested.write(&mut socket).unwrap();
         }
 
-        while let Ok(msg) = TorrentMsg::read(&mut socket).await {
+        while let Ok(msg) = TorrentMsg::read(&mut socket) {
             match msg {
-                TorrentMsg::Interested => TorrentMsg::Unchoke.write(&mut socket).await.unwrap(),
+                TorrentMsg::Interested => TorrentMsg::Unchoke.write(&mut socket).unwrap(),
                 TorrentMsg::Have(i) => other_have.set(i, true),
                 TorrentMsg::Bitfield(have) => other_have |= have,
                 TorrentMsg::Request(index, block_len) => {
@@ -100,7 +100,7 @@ impl FakePeer {
                     let end = start + block_len;
                     TorrentMsg::Block(index, Bytes::copy_from_slice(&self.data.bytes[start..end]))
                         .write(&mut socket)
-                        .await
+                        
                         .unwrap();
                 }
                 TorrentMsg::Block(index, block) => {
@@ -123,7 +123,7 @@ impl FakePeer {
                         self.meta_info.piece_len(piece_index),
                     )
                     .write(&mut socket)
-                    .await
+                    
                     .unwrap();
                 }
             }

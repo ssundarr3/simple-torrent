@@ -24,8 +24,9 @@ use crate::magnet_link::MagnetLinkInfo;
 use crate::meta_info::MetaInfo;
 use crate::tracker::Tracker;
 use anyhow::Result;
+use std::collections::HashMap;
+use std::net::TcpStream;
 use structopt::StructOpt;
-use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, StructOpt)]
 #[structopt(name = "torrent", about = "A simple Bittorrent client.")]
@@ -70,47 +71,15 @@ fn parse_cmd_input(input_str: &str) -> Result<CmdInput> {
     }
 }
 
-pub async fn run(opts: CmdOptions) -> Result<()> {
+pub fn run(opts: CmdOptions) -> Result<()> {
     let cache_dir = if opts.no_cache {
         None
     } else {
         Some(opts.cache_dir)
     };
 
-    /*
-    TODO:
-        // Create the listener.
-        // Create the dht.
-
-        // A list of peer connections.
-        // let mut peer_conns = vec![];
-
-        // Create the tracker (needs announce url).
-
-        // loop {
-        //     // Get new peer connections.
-
-        //     // See if it's time for a timeout.
-
-        //     // Check dht messages.
-
-        //     // Check torrent messages.
-
-        //     // Reply to torrent messages.
-        // }
-
-        // Handle SIGINT and cache before quitting.
-        // Maybe create a cached list of good peers and bad peers.
-    */
-
     let meta_info = match opts.cmd_input {
         CmdInput::MagnetLink { .. } => {
-            // TODO:
-            // Query dht for peers with this info hash.
-            // Hopefully we get to connect with some peers either from dht or from cached tracker responses.
-            // Send torrent handshake messages to these peers to connect.
-            // Ask nicely for meta info file.
-            // Construct meta info file and return back. Maintain connections with peers.
             todo!("Magnet link not yet supported");
         }
         CmdInput::TorrentFile(filepath) => {
@@ -121,10 +90,50 @@ pub async fn run(opts: CmdOptions) -> Result<()> {
     };
 
     // Listen for new connections.
-    let (send_chan, recv_chan) = mpsc::unbounded_channel();
-    let mut listener = Listener::new(meta_info.info_hash, send_chan.clone()).await?;
+    // let (send_chan, recv_chan) = mpsc::unbounded_channel();
+    let mut listener = Listener::new(meta_info.info_hash)?;
     let listen_addr = listener.addr()?;
-    tokio::spawn(async move { listener.start().await });
+
+    let mut peers: HashMap<usize, TcpStream> = HashMap::new();
+
+    // info!("Starting torrent!");
+    // self.tracker.make_request(self.left, tracker::Event::None);
+
+    // Data being cached:
+    // Peer Id
+    // Peers (and whether we successfully connected or not...)
+    // Tracker:
+    // downloaded and uploaded information.
+    // last query time
+    //
+    // Dht Routing Table
+
+    // let mut timeout_counter: u64 = 0;
+    // let mut last_timeout = SystemTime::UNIX_EPOCH;
+    // const UNCHOKE_PERIOD: u64 = 3;
+    // todo!("lol do this");
+    // // while seed_on_done || self.left > 0 {
+    // //     // TODO: `try_recv` might be simpler...
+    // //     let chan_msg_fut = recv_chan.recv();
+    // //     let duration_left = TIMEOUT_DURATION
+    // //         .checked_sub(last_timeout.elapsed().unwrap())
+    // //         .unwrap_or(ZERO_DURATION);
+    // //     // match timeout(duration_left, chan_msg_fut) {
+    // //     //     Err(_) => {
+    // //     //         let rotate_unchoke = timeout_counter % UNCHOKE_PERIOD == 0;
+    // //     //         self.handle_timeout(rotate_unchoke);
+    // //     //         last_timeout = SystemTime::now();
+    // //     //         timeout_counter += 1;
+    // //     //     }
+    // //     //     Ok(Some(chan_msg)) => self.handle_chan_msg(chan_msg),
+    // //     //     Ok(None) => break,
+    // //     // }
+    // // }
+
+    // info!("Stopping torrent...");
+    // self.tracker
+    //     .make_request(self.left, tracker::Event::Stopped);
+    // tokio::spawn(async move { listener.start() });
 
     let tracker = Tracker::new(
         &meta_info.name,
@@ -133,9 +142,32 @@ pub async fn run(opts: CmdOptions) -> Result<()> {
         listen_addr,
         cache_dir,
     );
-    let mut torrent = torrent::Torrent::new(opts.max_peers, send_chan, tracker, meta_info);
+    let mut torrent = torrent::Torrent::new(opts.max_peers, tracker, meta_info);
 
-    torrent.start(recv_chan, opts.seed_on_done).await;
+    while opts.seed_on_done || !torrent.is_done() {
+        // Get new peers from listener.
+        let peer_streams = listener.accept_conns();
+
+        // Check dht for messages.
+
+        // Get and process messages from peers.
+        // for message in peer_list.get_messages() {
+        //     //
+        // }
+
+        // Request pieces from peers.
+
+        // Query tracker if timeout.
+
+        // Switch the optimistically unchoked peers if third timeout.
+    }
+
+    /*
+    // Handle SIGINT and cache before quitting.
+    // Maybe create a cached list of good peers and bad peers.
+     */
+
+    torrent.start(opts.seed_on_done);
 
     Ok(())
 }

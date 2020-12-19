@@ -1,9 +1,9 @@
 mod piece;
 
-use crate::chan_msg::{ChanMsg, ChanMsgKind};
+// use crate::chan_msg::{ChanMsg, ChanMsgKind};
 use crate::handshake::Handshake;
 use crate::meta_info::MetaInfo;
-use crate::peer_conn::PeerConn;
+// use crate::peer_conn::PeerConn;
 use crate::torrent::piece::{Piece, PieceStatus};
 use crate::torrent_msg::{DataIndex, TorrentMsg};
 use crate::tracker::{self, Tracker};
@@ -14,9 +14,10 @@ use bitvec::{order::Msb0, vec::BitVec};
 use bytes::Bytes;
 use sha1::{Digest, Sha1};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::net::TcpStream;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant, SystemTime};
-use tokio::{net::tcp, net::TcpStream, sync::mpsc, time::timeout};
+// use tokio::{net::tcp, net::TcpStream, sync::mpsc, time::timeout};
 
 const ZERO_DURATION: Duration = Duration::from_secs(0);
 const TIMEOUT_DURATION: Duration = Duration::from_secs(10);
@@ -29,7 +30,8 @@ type MsbBitVec = BitVec<Msb0, u8>;
 #[derive(Debug)]
 struct Peer {
     peer_index: usize,
-    send_tcp: tcp::OwnedWriteHalf,
+    // send_tcp: tcp::OwnedWriteHalf,
+    socket: TcpStream,
     peer_ip: IpAddr,
     /// A bitfield of the pieces that this peer has.
     have: MsbBitVec,
@@ -52,16 +54,11 @@ struct Peer {
 }
 
 impl Peer {
-    pub fn new(
-        peer_index: usize,
-        num_pieces: usize,
-        send_tcp: tcp::OwnedWriteHalf,
-        peer_ip: IpAddr,
-    ) -> Peer {
+    pub fn new(peer_index: usize, num_pieces: usize, socket: TcpStream, peer_ip: IpAddr) -> Peer {
         const DEFAULT_MAX_QUEUE_LEN: usize = 5;
         Peer {
             peer_index,
-            send_tcp,
+            socket,
             peer_ip,
             have: BitVec::repeat(false, div_ceil(num_pieces, 8) * 8),
             last_msg_time: Instant::now(),
@@ -77,22 +74,22 @@ impl Peer {
         }
     }
 
-    pub async fn set_am_interested(&mut self, value: bool) -> Result<()> {
+    pub fn set_am_interested(&mut self, value: bool) -> Result<()> {
         if self.am_interested != value {
             let msg = if value {
                 TorrentMsg::Interested
             } else {
                 TorrentMsg::NotInterested
             };
-            self.send(msg).await?;
+            self.send(msg)?;
             self.am_interested = value;
         }
         Ok(())
     }
 
-    pub async fn send(&mut self, msg: TorrentMsg) -> Result<()> {
+    pub fn send(&mut self, msg: TorrentMsg) -> Result<()> {
         trace!("Sending to peer {}: {}", self.peer_index, msg);
-        msg.write(&mut self.send_tcp).await?;
+        msg.write(&mut self.socket)?;
         Ok(())
     }
 }
@@ -100,7 +97,6 @@ impl Peer {
 pub struct Torrent {
     tracker: Tracker,
     meta_info: MetaInfo,
-    send_chan: mpsc::UnboundedSender<ChanMsg>,
     left: usize,
     have: MsbBitVec,
     cur_pieces: HashMap<usize, Piece>,
@@ -110,12 +106,7 @@ pub struct Torrent {
 }
 
 impl Torrent {
-    pub fn new(
-        max_peers: usize,
-        send_chan: mpsc::UnboundedSender<ChanMsg>,
-        tracker: Tracker,
-        meta_info: MetaInfo,
-    ) -> Torrent {
+    pub fn new(max_peers: usize, tracker: Tracker, meta_info: MetaInfo) -> Torrent {
         let mut left = meta_info.data_len;
         let mut have = BitVec::repeat(false, div_ceil(meta_info.num_pieces, 8) * 8);
         for piece_index in 0..meta_info.num_pieces {
@@ -137,7 +128,6 @@ impl Torrent {
 
         Torrent {
             tracker,
-            send_chan,
             left,
             have,
             meta_info,
@@ -146,6 +136,10 @@ impl Torrent {
             do_not_contact: HashSet::new(),
             max_peers,
         }
+    }
+
+    pub fn is_done(&self) -> bool {
+        self.left > 0
     }
 
     fn shutdown(&mut self, peer_index: usize) {
@@ -242,7 +236,7 @@ impl Torrent {
             .sum::<usize>()
     }
 
-    async fn handle_torrent_msg(&mut self, peer_index: usize, msg: TorrentMsg) -> Result<()> {
+    fn handle_torrent_msg(&mut self, peer_index: usize, msg: TorrentMsg) -> Result<()> {
         let peer = if let Some(peer) = self.peers.get_mut(&peer_index) {
             peer
         } else {
@@ -265,8 +259,7 @@ impl Torrent {
                     .unwrap();
                     if let Some(block_data) = piece_data.get(index.offset..index.offset + block_len)
                     {
-                        peer.send(TorrentMsg::Block(index, Bytes::copy_from_slice(block_data)))
-                            .await?;
+                        peer.send(TorrentMsg::Block(index, Bytes::copy_from_slice(block_data)))?;
                         peer.upload_rate += block_len as u64;
                     } else {
                         warn!("Invalid block request: {:?} len={}", index, block_len);
@@ -286,7 +279,7 @@ impl Torrent {
                 }
                 peer.have.set(piece_index, true);
                 if !self.have[piece_index] {
-                    peer.set_am_interested(true).await?;
+                    peer.set_am_interested(true)?;
                 }
             }
             TorrentMsg::Bitfield(have) => {
@@ -296,7 +289,7 @@ impl Torrent {
                 peer.have |= have;
                 let pieces_to_get: MsbBitVec = !self.have.clone() & peer.have.clone();
                 if pieces_to_get.any() {
-                    peer.set_am_interested(true).await?;
+                    peer.set_am_interested(true)?;
                 }
             }
             TorrentMsg::Block(index, block) => {
@@ -321,16 +314,15 @@ impl Torrent {
 
                             let download_complete = self.left == 0;
                             for peer in self.peers.values_mut() {
-                                let _ = peer.send(TorrentMsg::Have(index.piece)).await;
+                                let _ = peer.send(TorrentMsg::Have(index.piece));
                                 if download_complete {
-                                    let _ = peer.set_am_interested(false).await;
+                                    let _ = peer.set_am_interested(false);
                                 }
                             }
                             if download_complete {
                                 info!("Download complete!");
                                 self.tracker
-                                    .make_request(self.left, tracker::Event::Completed)
-                                    .await;
+                                    .make_request(self.left, tracker::Event::Completed);
                             }
                         }
                     }
@@ -350,10 +342,10 @@ impl Torrent {
 
             let peer = self.peers.get_mut(&peer_index).unwrap();
             if requests.is_empty() {
-                peer.set_am_interested(false).await?;
+                peer.set_am_interested(false)?;
             }
             for (index, block_len) in requests {
-                peer.send(TorrentMsg::Request(index, block_len)).await?;
+                peer.send(TorrentMsg::Request(index, block_len))?;
                 peer.cur_queue_len += 1;
             }
         }
@@ -362,39 +354,39 @@ impl Torrent {
         let peer = &self.peers[&peer_index];
         if peer.am_choking && peer.peer_interested && self.num_downloaders() < MAX_DOWNLOADERS {
             let peer = self.peers.get_mut(&peer_index).unwrap();
-            peer.send(TorrentMsg::Unchoke).await?;
+            peer.send(TorrentMsg::Unchoke)?;
             peer.am_choking = false;
         }
 
         Ok(())
     }
 
-    async fn handle_chan_msg(&mut self, chan_msg: ChanMsg) {
-        trace!("Received from {}: {}", chan_msg.peer_index, chan_msg.kind);
-        match chan_msg.kind {
-            ChanMsgKind::NewPeer(mut send_tcp, peer_ip) => {
-                let handshake = Handshake::new(self.meta_info.info_hash, self.tracker.my_peer_id);
-                let _ = handshake.write(&mut send_tcp).await;
-                let mut peer = Peer::new(
-                    chan_msg.peer_index,
-                    self.meta_info.num_pieces,
-                    send_tcp,
-                    peer_ip,
-                );
-                let _ = peer.send(TorrentMsg::Bitfield(self.have.clone())).await;
-                self.peers.insert(chan_msg.peer_index, peer);
-            }
-            ChanMsgKind::Msg(msg) => {
-                if let Err(e) = self.handle_torrent_msg(chan_msg.peer_index, msg).await {
-                    warn!("torrent msg err for peer {}: {}", chan_msg.peer_index, e);
-                    self.shutdown(chan_msg.peer_index);
-                }
-            }
-            ChanMsgKind::Shutdown => self.shutdown(chan_msg.peer_index),
-        }
-    }
+    // fn handle_chan_msg(&mut self, chan_msg: ChanMsg) {
+    //     trace!("Received from {}: {}", chan_msg.peer_index, chan_msg.kind);
+    //     match chan_msg.kind {
+    //         ChanMsgKind::NewPeer(mut send_tcp, peer_ip) => {
+    //             let handshake = Handshake::new(self.meta_info.info_hash, self.tracker.my_peer_id);
+    //             let _ = handshake.write(&mut send_tcp);
+    //             let mut peer = Peer::new(
+    //                 chan_msg.peer_index,
+    //                 self.meta_info.num_pieces,
+    //                 send_tcp,
+    //                 peer_ip,
+    //             );
+    //             let _ = peer.send(TorrentMsg::Bitfield(self.have.clone()));
+    //             self.peers.insert(chan_msg.peer_index, peer);
+    //         }
+    //         ChanMsgKind::Msg(msg) => {
+    //             if let Err(e) = self.handle_torrent_msg(chan_msg.peer_index, msg) {
+    //                 warn!("torrent msg err for peer {}: {}", chan_msg.peer_index, e);
+    //                 self.shutdown(chan_msg.peer_index);
+    //             }
+    //         }
+    //         ChanMsgKind::Shutdown => self.shutdown(chan_msg.peer_index),
+    //     }
+    // }
 
-    async fn handle_timeout(&mut self, _rotate_unchoke: bool) {
+    fn handle_timeout(&mut self, _rotate_unchoke: bool) {
         // Update the state for the tracker and for each peer.
         let mut down_speed = 0.0;
         let mut up_speed = 0.0;
@@ -430,7 +422,7 @@ impl Torrent {
 
             // Disconnect (or keep alive) unused connections.
             if peer.am_interested && peer.last_msg_time.elapsed() > KEEPALIVE_TIME {
-                let _ = peer.send(TorrentMsg::KeepAlive).await;
+                let _ = peer.send(TorrentMsg::KeepAlive);
             }
             if !peer.am_interested && peer.last_msg_time.elapsed() > DISCONNECT_TIME {
                 to_shutdown.push(peer.peer_index);
@@ -452,9 +444,7 @@ impl Torrent {
 
         // Maybe make tracker request and add new peers from tracker request.
         if self.tracker.should_request() {
-            self.tracker
-                .make_request(self.left, tracker::Event::None)
-                .await;
+            self.tracker.make_request(self.left, tracker::Event::None);
         }
         // Cache tracker information regardless, as bytes downloaded, uploaded were updated.
         self.tracker.maybe_save_to_cache();
@@ -471,51 +461,46 @@ impl Torrent {
                 .collect();
             for peer_addr in to_connect_addrs {
                 self.do_not_contact.insert(peer_addr.ip());
-                let send_chan = self.send_chan.clone();
+                // let send_chan = self.send_chan.clone();
                 let info_hash = self.meta_info.info_hash;
-                tokio::spawn(async move {
-                    if let Ok(socket) = TcpStream::connect(peer_addr).await {
-                        PeerConn::start(socket, send_chan, info_hash).await
-                    }
-                });
+                todo!("ddd");
+                // tokio::spawn(async move {
+                //     if let Ok(socket) = TcpStream::connect(peer_addr) {
+                //         PeerConn::start(socket, send_chan, info_hash)
+                //     }
+                // });
             }
         }
     }
 
-    pub async fn start(
-        &mut self,
-        mut recv_chan: mpsc::UnboundedReceiver<ChanMsg>,
-        seed_on_done: bool,
-    ) {
+    pub fn start(&mut self, seed_on_done: bool) {
         info!("Starting torrent!");
-        self.tracker
-            .make_request(self.left, tracker::Event::None)
-            .await;
+        self.tracker.make_request(self.left, tracker::Event::None);
 
         let mut timeout_counter: u64 = 0;
         let mut last_timeout = SystemTime::UNIX_EPOCH;
         const UNCHOKE_PERIOD: u64 = 3;
-        while seed_on_done || self.left > 0 {
-            // TODO: `try_recv` might be simpler...
-            let chan_msg_fut = recv_chan.recv();
-            let duration_left = TIMEOUT_DURATION
-                .checked_sub(last_timeout.elapsed().unwrap())
-                .unwrap_or(ZERO_DURATION);
-            match timeout(duration_left, chan_msg_fut).await {
-                Err(_) => {
-                    let rotate_unchoke = timeout_counter % UNCHOKE_PERIOD == 0;
-                    self.handle_timeout(rotate_unchoke).await;
-                    last_timeout = SystemTime::now();
-                    timeout_counter += 1;
-                }
-                Ok(Some(chan_msg)) => self.handle_chan_msg(chan_msg).await,
-                Ok(None) => break,
-            }
-        }
+        todo!("lol do this");
+        // while seed_on_done || self.left > 0 {
+        //     // TODO: `try_recv` might be simpler...
+        //     let chan_msg_fut = recv_chan.recv();
+        //     let duration_left = TIMEOUT_DURATION
+        //         .checked_sub(last_timeout.elapsed().unwrap())
+        //         .unwrap_or(ZERO_DURATION);
+        //     // match timeout(duration_left, chan_msg_fut) {
+        //     //     Err(_) => {
+        //     //         let rotate_unchoke = timeout_counter % UNCHOKE_PERIOD == 0;
+        //     //         self.handle_timeout(rotate_unchoke);
+        //     //         last_timeout = SystemTime::now();
+        //     //         timeout_counter += 1;
+        //     //     }
+        //     //     Ok(Some(chan_msg)) => self.handle_chan_msg(chan_msg),
+        //     //     Ok(None) => break,
+        //     // }
+        // }
 
         info!("Stopping torrent...");
         self.tracker
-            .make_request(self.left, tracker::Event::Stopped)
-            .await;
+            .make_request(self.left, tracker::Event::Stopped);
     }
 }
